@@ -702,10 +702,7 @@ export default function OrderDetails() {
               ) => (
 
                 <View
-                  key={
-                    product.productId ||
-                    `product-${index}`
-                  }
+                  key={`${product.productId || "product"}-${product.variantId || ""}-${index}`}
                   className={`flex-row justify-between py-3 ${
                     index < (order.products?.length || 0) - 1
                       ? "border-b border-gray-100"
@@ -718,6 +715,12 @@ export default function OrderDetails() {
                     <Text className="font-semibold text-gray-800">
                       {product.name}
                     </Text>
+
+                    {product.variantName ? (
+                      <Text className="mt-0.5 text-xs font-semibold text-[#14532d]">
+                        {product.variantName}
+                      </Text>
+                    ) : null}
 
                     <Text className="mt-1 text-sm text-gray-600">
                       Qty:{" "}

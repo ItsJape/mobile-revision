@@ -17,40 +17,35 @@ import { CartItem } from "../types/cart";
 
 const cartCollection = collection(db, "cart");
 
-// Adds a product to the cart, or adds to the quantity of the line that already
-// holds the same product, batch, and egg tray size.
+// Adds a product variant to the cart, or adds to the quantity of the line that
+// already holds the same product and variant.
 export const addToCart = async (item: CartItem) => {
   try {
+    if (!item.variantId) {
+      throw new Error("Please choose a product option.");
+    }
+
     const q = query(
       cartCollection,
       where("buyerId", "==", item.buyerId),
       where("productId", "==", item.productId),
-      where("batchId", "==", item.batchId)
+      where("variantId", "==", item.variantId)
     );
 
     const snap = await getDocs(q);
 
-    const variant = (item as any).eggVariant || null;
-
-    const match = snap.docs.find(
-      (d) => ((d.data() as any).eggVariant || null) === variant
-    );
+    const match = snap.docs[0];
 
     if (match) {
       const data = match.data() as any;
       const existingQty = Number(data.quantity) || 1;
-      const existingBase = Number(
-        data.baseQuantity ?? data.quantity
-      );
-
-      const addBase = Number(
-        (item as any).baseQuantity ?? item.quantity
-      );
 
       await updateDoc(doc(db, "cart", match.id), {
         quantity: existingQty + item.quantity,
-        // Stock is deducted using the base quantity, so it has to grow alongside it.
-        baseQuantity: existingBase + addBase,
+        // Keep the preview in line with the variant the buyer just saw.
+        price: item.price,
+        unit: item.unit,
+        variantName: item.variantName || data.variantName || "",
       });
 
       return;
@@ -84,18 +79,11 @@ export const getCartByBuyer = async (buyerId: string) => {
   }
 };
 
-// Sets the quantity of one cart line. baseQuantity is only written when given.
-export const updateCartQuantity = async (
-  docId: string,
-  quantity: number,
-  baseQuantity?: number
-) => {
+// Sets the quantity of one cart line.
+export const updateCartQuantity = async (docId: string, quantity: number) => {
   try {
     const ref = doc(db, "cart", docId);
-    await updateDoc(
-      ref,
-      baseQuantity === undefined ? { quantity } : { quantity, baseQuantity }
-    );
+    await updateDoc(ref, { quantity });
   } catch (error) {
     console.log("UPDATE CART ERROR:", error);
     throw error;
@@ -135,8 +123,12 @@ export const deleteCartItemsByProductId = async (productId: string) => {
   }
 };
 
-// Removes the cart lines of one deleted batch, leaving other batches untouched.
-export const deleteCartItemsByBatchId = async (batchId: string) => {
+// Removes the cart lines of one deleted variant, leaving the other variants of
+// the product untouched. Call it after deleteProductVariant succeeds.
+export const deleteCartItemsByVariantId = async (
+  productId: string,
+  variantId: string
+) => {
   try {
     const farmerId = getAuth().currentUser?.uid;
     if (!farmerId) {
@@ -144,7 +136,8 @@ export const deleteCartItemsByBatchId = async (batchId: string) => {
     }
     const q = query(
       cartCollection,
-      where("batchId", "==", batchId),
+      where("productId", "==", productId),
+      where("variantId", "==", variantId),
       where("farmerId", "==", farmerId)
     );
     const snapshot = await getDocs(q);
@@ -152,7 +145,7 @@ export const deleteCartItemsByBatchId = async (batchId: string) => {
     const deletes = snapshot.docs.map((d) => deleteDoc(doc(db, "cart", d.id)));
     await Promise.all(deletes);
   } catch (error) {
-    console.log("DELETE CART BY BATCH ERROR:", error);
+    console.log("DELETE CART BY VARIANT ERROR:", error);
     throw error;
   }
 };

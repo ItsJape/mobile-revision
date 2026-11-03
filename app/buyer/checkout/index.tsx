@@ -53,10 +53,6 @@ import {
 } from "@/src/services/cartService";
 
 import {
-  normalizeEggVariant,
-  eggVariantToBaseQuantity,
-} from "@/src/constants/productCatalog";
-import {
   FARMER_CONTENT_BOTTOM_GAP,
   getFarmerScreenBottomPadding,
 } from "@/src/constants/farmerLayout";
@@ -594,6 +590,18 @@ export default function Checkout() {
         );
       }
 
+      // Every line must say which variant the buyer chose.
+      const lineWithoutVariant = cart
+        .flatMap((farm: any) => farm?.products || [])
+        .find((p: any) => !String(p?.variantId || "").trim());
+
+      if (lineWithoutVariant) {
+        return Alert.alert(
+          "Choose an option",
+          `Please remove ${lineWithoutVariant.name || "this item"} from your cart and add it again so we know which option you want.`
+        );
+      }
+
       setLoading(true);
 
       const createdOrderIds:
@@ -671,74 +679,19 @@ export default function Checkout() {
             farmTotal +
             farmDeliveryFee;
 
-          const products =
-            farm.products.map(
-              (p: any) => {
-                // Egg tray size chosen by the buyer. Price, quantity, and unit are in that tray
-                // size, while baseQuantity is the equivalent in the farmer's
-                // listing unit and is what the backend deducts from stock. It is
-                // recomputed here instead of trusting what the cart stored.
-                const eggV = normalizeEggVariant(p.eggVariant);
-                const baseU = p.baseUnit || p.unit || "";
-                const qty = Number(p.quantity || 0);
-
-                return {
-                productId:
-                  String(
-                    p.productId ||
-                    p.docId ||
-                    ""
-                  ),
-
-                batchId:
-                  null,
-
-                batchNumber:
-                  null,
-
-                harvestRecordId:
-                  null,
-
-                contributions:
-                  [],
-
-                name:
-                  p.name ||
-                  "",
-
-                image:
-                  p.image ||
-                  "",
-
-                price:
-                  Number(
-                    p.price ||
-                    0
-                  ),
-
-                quantity:
-                  qty,
-
-                unit:
-                  p.unit ||
-                  "",
-
-                eggVariant:
-                  eggV,
-
-                baseUnit:
-                  baseU,
-
-                baseQuantity:
-                  eggV
-                    ? eggVariantToBaseQuantity(eggV, qty, baseU)
-                    : qty,
-
-                reviewed:
-                  false,
-                };
-              }
-            );
+          // One order line = one product variant. The server re-reads the variant
+          // price, unit and stock, so these values are only what the buyer saw.
+          const products = farm.products.map((p: any) => ({
+            productId: String(p.productId || p.docId || ""),
+            variantId: String(p.variantId || ""),
+            variantName: p.variantName || "",
+            name: p.name || "",
+            image: p.image || "",
+            price: Number(p.price || 0),
+            quantity: Number(p.quantity || 0),
+            unit: p.unit || "",
+            reviewed: false,
+          }));
 
           const orderResult =
             await createOrder({
@@ -878,6 +831,11 @@ export default function Checkout() {
       } catch (
         error: any
       ) {
+        console.log("PLACE ORDER ERROR:", {
+          message: error?.message,
+          code: error?.code,
+          status: error?.status,
+        });
         Alert.alert(
           "Order Error",
           getUserFriendlyErrorMessage(
@@ -1115,6 +1073,12 @@ export default function Checkout() {
                           {p.name}
                         </Text>
 
+                        {p.variantName ? (
+                          <Text className="text-green-900 text-xs mt-0.5 font-semibold">
+                            {p.variantName}
+                          </Text>
+                        ) : null}
+
                         <Text className="text-green-900 font-bold mt-1">
                           ₱
                           {Number(
@@ -1130,11 +1094,6 @@ export default function Checkout() {
                             p.quantity
                           }
                           {p.unit ? ` ${String(p.unit).replace(/^per\s+/i, "")}` : ""}
-                          {normalizeEggVariant(p.eggVariant) === "half"
-                            ? " (15 pcs)"
-                            : normalizeEggVariant(p.eggVariant) === "full"
-                              ? " (30 pcs)"
-                              : ""}
                         </Text>
                       </View>
 

@@ -24,6 +24,7 @@ import { cancelOrder, createGcashPayment, syncOrderPayment, } from "../../../src
 import { useToast } from "@/src/context/ToastContext";
 import { getUserFriendlyErrorMessage } from "@/src/utils/userFacingError";
 import { getFarmerScreenBottomPadding } from "@/src/constants/farmerLayout";
+import { getOrderProductReviewKey } from "@/src/utils/orderReview";
 import { OrderType, OrderProduct, } from "@/src/types/order";
 
 // The dark green used across the app.
@@ -402,9 +403,10 @@ export default function OrderDetails() {
       );
     };
 
-  // Runs after a review was saved for the product that was rated.
+  // Runs after a review was saved. Receives the composite key of the exact
+  // product variant that was reviewed, so only that variant is marked.
   const handleReviewSubmitted =
-    (productId: string) => {
+    (reviewKey: string) => {
 
       setOrder(
         (prev) => {
@@ -413,21 +415,19 @@ export default function OrderDetails() {
             return prev;
           }
 
+          const ids =
+            prev.reviewedProductIds || [];
+
+          if (ids.includes(reviewKey)) {
+            return prev;
+          }
+
           return {
             ...prev,
-
-            products:
-              prev.products.map(
-                (p) =>
-                  p.productId ===
-                  productId
-                    ? {
-                        ...p,
-                        reviewed:
-                          true,
-                      }
-                    : p
-              ),
+            reviewedProductIds: [
+              ...ids,
+              reviewKey,
+            ],
           };
         }
       );
@@ -891,18 +891,32 @@ export default function OrderDetails() {
               item,
               index
             ) =>
-              item.productId ||
-              `product-${index}`
+              `${item.productId || "product"}-${item.variantId || ""}-${index}`
             }
             renderItem={({
               item,
             }) => {
 
+              const isCompleted =
+                order.status === "delivered" ||
+                order.status === "claimed";
+
+              // Each product variant has its own review key.
+              const reviewKey =
+                getOrderProductReviewKey(
+                  item.productId,
+                  item.variantId,
+                  item.variantName
+                );
+
+              // The plain productId check keeps older orders working,
+              // because older reviews were saved by product only.
+              const isReviewed =
+                !!order.reviewedProductIds?.includes(reviewKey) ||
+                !!order.reviewedProductIds?.includes(item.productId);
+
               const canRate =
-                (order.status === "delivered" ||
-                  order.status === "claimed") &&
-                !item.reviewed &&
-                !order.reviewedProductIds?.includes(item.productId);
+                isCompleted && !isReviewed;
 
               return (
                 <View className="mb-5">
@@ -936,6 +950,12 @@ export default function OrderDetails() {
                       <Text className="font-semibold text-sm text-gray-900" numberOfLines={1}>
                         {item.name}
                       </Text>
+
+                      {item.variantName ? (
+                        <Text className="text-green-900 text-xs font-semibold mt-0.5">
+                          {item.variantName}
+                        </Text>
+                      ) : null}
 
                       <Text className="text-gray-500 text-xs mt-1">
                         Qty:{" "}
@@ -974,10 +994,7 @@ export default function OrderDetails() {
                     </TouchableOpacity>
                   )}
 
-                  {(order.status === "delivered" ||
-                    order.status === "claimed") &&
-                    (item.reviewed ||
-                      order.reviewedProductIds?.includes(item.productId)) && (
+                  {isCompleted && isReviewed && (
 
                     <View className="mt-3 self-start py-2.5 flex-row items-center">
 

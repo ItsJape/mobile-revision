@@ -1,27 +1,48 @@
+
 import type { OrderProduct } from "./order";
 
-// The product document, its harvest batches, and its reviews. A product is the
-// stable listing; batches are the dated stock lots a farmer sells from.
 export type ProductCategory =
   | "Fruits"
   | "Egg & Poultry"
   | "Vegetables"
   | "Rice & Grains";
 
-export type ProductUnit = "per kg" | "per pcs";
+export type ProductUnit = string;
 
 export type ProductStatus = "Available" | "Out of Stock";
 
-// The product document a farmer creates, shared by its batches and reviews.
+// One product can have multiple independently priced variants.
+export type ProductVariant = {
+  id: string;
+  name: string;
+  unit: string;
+  price: number;
+  stock: number;
+  status: ProductStatus;
+  createdAt: number;
+  updatedAt?: number;
+};
+
+export type CreateProductVariantInput = {
+  id?: string;
+  name: string;
+  unit: string;
+  price: number;
+  stock: number;
+  status?: ProductStatus;
+};
+
 export type CreateProductInput = {
   name: string;
   category: string;
   unit: string;
   description: string;
+
   image: string;
   imagePublicId: string;
   images?: string[];
   imagePublicIds?: string[];
+
   video?: string;
   videoPublicId?: string;
 
@@ -29,86 +50,43 @@ export type CreateProductInput = {
   farmerName: string;
   farmName: string;
 
+  variants: ProductVariant[];
+
+  // Automatically calculated from the variants.
+  price: number;
+  stock: number;
+  status: ProductStatus;
+
   rating: number;
   totalReviews: number;
   totalSales: number;
   weeklySales: number;
   monthlySales: number;
+
   createdAt: number;
+  updatedAt?: number;
 
-  // Values copied here to make lists easy to render. Real inventory lives in
-  // productBatches.
-  price: number;
-  stock: number;
-  status: string;
-
-  // Set when the farmer archives the product instead of deleting it.
   archived: boolean;
+  lastReviewId?: string;
 };
 
 export type ProductType = CreateProductInput & {
   docId: string;
 };
 
-// An optional inventory group inside a product. There is no automatic weekly
-// or new batch rule: the farmer decides whether a new harvest joins the latest
-// active batch or starts a new batch.
-export type CreateBatchInput = {
-  productId: string;
-  farmerId: string;
-
-  batchNumber: number;
-
-  price: number;
-  stock: number;
-  totalHarvested: number;
-
-  // Either "Available" or "Out of Stock".
-  status: string;
-
-  createdAt: number;
-
-  // Set when the farmer archives the batch instead of deleting it.
-  archived: boolean;
-
-  // True when the batch was archived because its product was archived, and
-  // false when the farmer archived the batch on its own.
-  archivedViaProduct: boolean;
-};
-
-export type BatchType = CreateBatchInput & {
-  docId: string;
-};
-
-// A record of one harvest or restock, used to trace stock back to a date.
-export type CreateHarvestRecordInput = {
-  batchId: string;
-  productId: string;
-  farmerId: string;
-
-  quantity: number;
-  remainingQuantity: number;
-  harvestDate: number;
-  createdAt: number;
-
-  type: "harvest" | "restock";
-};
-
-export type HarvestRecordType = CreateHarvestRecordInput & {
-  docId: string;
-};
-
-// A rating and comment a buyer leaves after an order.
+// Review information no longer depends on a batch.
 export type CreateReviewInput = {
   productId: string;
+  variantId?: string;
+  variantName?: string;
+
   orderProduct: OrderProduct;
-  batchId: string;
-  batchNumber: number;
-  harvestRecordId?: string;
+
   orderId: string;
   buyerId: string;
   buyerName: string;
   buyerProfileImage?: string;
+
   rating: number;
   comment: string;
   createdAt: number;
@@ -116,13 +94,4 @@ export type CreateReviewInput = {
 
 export type ReviewType = CreateReviewInput & {
   docId: string;
-};
-
-// The part of a sale that came from one batch, so stock is deducted from the
-// right place.
-export type SaleContribution = {
-  batchId: string;
-  batchNumber: number;
-  harvestRecordId: string | null;
-  quantity: number;
 };

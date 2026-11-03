@@ -22,8 +22,24 @@ export default function ProductCard({
 }: Props) {
   const router = useRouter();
 
-  const stock = item.stock || 0;
-  const outOfStock = stock <= 0;
+  // The tile shows the cheapest variant that can still be bought. When the
+  // variants have different prices, the price is labelled "From".
+  const variants = item.variants ?? [];
+  const sellable = variants.filter(
+    (v) => Number(v.stock) > 0 && v.status === "Available"
+  );
+  const shown = sellable.length > 0 ? sellable : variants;
+  const cheapest =
+    shown.length > 0
+      ? shown.reduce((a, b) => (Number(b.price) < Number(a.price) ? b : a))
+      : null;
+
+  const price = cheapest ? Number(cheapest.price) : Number(item.price || 0);
+  const unit = cheapest?.unit || item.unit || "";
+  const hasPriceRange = shown.some((v) => Number(v.price) !== price);
+
+  const outOfStock =
+    variants.length > 0 ? sellable.length === 0 : (item.stock || 0) <= 0;
   const hasRating = (item.totalReviews || 0) > 0;
 
   return (
@@ -93,10 +109,13 @@ export default function ProductCard({
         </View>
 
         <View className="items-end justify-start pt-0.5">
+          {hasPriceRange && (
+            <Text className="text-gray-400 text-[9px]">From</Text>
+          )}
           <Text className="text-green-900 font-black text-xs">
-            ₱{Number(item.price).toFixed(2)}
+            ₱{price.toFixed(2)}
           </Text>
-          <Text className="text-gray-400 text-[9px] mt-0.5">/{item.unit}</Text>
+          <Text className="text-gray-400 text-[9px] mt-0.5">/{unit}</Text>
         </View>
       </View>
     </TouchableOpacity>

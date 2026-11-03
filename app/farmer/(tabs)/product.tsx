@@ -1,9 +1,11 @@
-// Farmer product list and batch manager screen.
+// Farmer Product Listing - Variant-based inventory.
+// No product batches or harvest records.
+
 import { Ionicons, MaterialIcons } from "@expo/vector-icons";
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { router, useLocalSearchParams } from "expo-router";
+import React, { useEffect, useState } from "react";
 import {
-  Dimensions,
+  Alert,
+  ActivityIndicator,
   Image,
   Modal,
   ScrollView,
@@ -11,215 +13,210 @@ import {
   TextInput,
   TouchableOpacity,
   View,
-  ActivityIndicator,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import AddProductModal from "../../farmer/products/add-product";
 import EditProductModal from "../../farmer/products/edit-product";
-import EditBatchModal from "../../farmer/products/edit-batch";
 import DeleteProductModal from "../../farmer/products/delete-product";
-import RecordSaleModal from "../../farmer/products/record-sale";
 
 import { deleteCartItemsByProductId } from "../../../src/services/cartService";
 
-import {
+import type {
   ProductType,
   CreateProductInput,
-  BatchType,
-  HarvestRecordType,
+  ProductVariant,
+  ProductStatus,
 } from "../../../src/types/product";
 
-import { deleteCloudinaryImage } from "../../../src/services/deleteImageService";
-
 import {
-  addHarvest,
+  createProduct,
   archiveProduct,
   unarchiveProduct,
-  archiveBatch,
-  unarchiveBatch,
   getFarmerProducts,
   getArchivedProducts,
-  getBatchesByProduct,
-  getHarvestRecordsByBatch,
   updateProductInfo,
-  updateBatch,
-  recordSale,
+  addProductVariant,
+  updateProductVariant,
+  deleteProductVariant,
+  subscribeToFarmerProducts,
 } from "../../../src/services/productService";
 
+import { uploadImageAsync } from "../../../src/services/cloudinaryService";
+
 import {
-  uploadImageAsync,
-  uploadProductVideoAsync,
-} from "../../../src/services/cloudinaryService";
-import { useToast } from "@/src/context/ToastContext";
-import { getUserFriendlyErrorMessage } from "@/src/utils/userFacingError";
-import FarmerTutorialVideoModal from "@/src/components/FarmerTutorialVideoModal";
-import {
-  getFarmerScreenBottomPadding,
-  getFarmerTabBarClearance,
-} from "@/src/constants/farmerLayout";
-
-const formatDate = (ts: number) =>
-  new Date(ts).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
-
-const getVideoThumbnailUrl = (videoUrl: string) =>
-  videoUrl
-    .replace("/video/upload/", "/video/upload/so_0/")
-    .replace(/\.[^/.]+$/, ".jpg");
-
-// Upload product photos and video before saving.
-const uploadProductMedia = async (product: {
-  image: string;
-  imagePublicId: string;
-  images?: string[];
-  imagePublicIds?: string[];
-  video?: string;
-  videoPublicId?: string;
-}) => {
-  const images = product.images?.length
-    ? product.images
-    : !product.video && product.image
-      ? [product.image]
-      : [];
-  const uploadedImages = await Promise.all(
-    images.map(async (uri, index) => {
-      if (uri.startsWith("https://")) {
-        return {
-          imageUrl: uri,
-          publicId:
-            product.imagePublicIds?.[index] ||
-            (index === 0 ? product.imagePublicId : ""),
-        };
-      }
-      return uploadImageAsync(uri);
-    })
-  );
-
-  let video = product.video || "";
-  let videoPublicId = video ? product.videoPublicId || "" : "";
-  if (video && !video.startsWith("https://")) {
-    const uploadedVideo = await uploadProductVideoAsync(video);
-    video = uploadedVideo.videoUrl;
-    videoPublicId = uploadedVideo.publicId;
-  }
-
-  return {
-    image:
-      uploadedImages[0]?.imageUrl ||
-      (video ? getVideoThumbnailUrl(video) : ""),
-    imagePublicId: uploadedImages[0]?.publicId || "",
-    images: uploadedImages.map((item) => item.imageUrl),
-    imagePublicIds: uploadedImages.map((item) => item.publicId),
-    video,
-    videoPublicId,
-  };
-};
+  ProductCategoryKey,
+  getUnitsForProduct,
+} from "@/src/constants/productCatalog";
 
 type ViewMode = "active" | "archived";
-
-// Filter options share the farm profile sort design.
-const FILTER_OPTIONS = [
-  { value: "active", label: "Active", icon: "leaf-outline" },
-  { value: "archived", label: "Archive", icon: "archive-outline" },
-  { value: "low_stock", label: "Low stock", icon: "warning-outline" },
-  { value: "out_of_stock", label: "Out of stock", icon: "ban-outline" },
-] as const;
 
 type ProductScreenProps = {
   detailProductId?: string;
   initialViewMode?: ViewMode;
 };
 
-type Confirmation = {
-  title: string;
-  message: string;
-  confirmLabel: string;
-  destructive?: boolean;
-  onConfirm: () => Promise<void>;
+type VariantDraft = {
+  name: string;
+  unit: string;
+  price: string;
+  stock: string;
+  status: ProductStatus;
 };
 
-export const ProductScreen = ({
-  detailProductId,
-  initialViewMode,
-}: ProductScreenProps = {}) => {
-  const insets = useSafeAreaInsets();
-  const { showToast } = useToast();
-  const { filter: routeFilter } = useLocalSearchParams<{ filter?: string }>();
-  const [viewMode, setViewMode] = useState<ViewMode>(
-    initialViewMode || "active"
-  );
-  const [listFilter, setListFilter] = useState<
-    "active" | "archived" | "low_stock" | "out_of_stock"
-  >(initialViewMode === "archived" ? "archived" : "active");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [showFilterModal, setShowFilterModal] = useState(false);
-  const [showProductsTutorial, setShowProductsTutorial] = useState(false);
-  const [dropdownPos, setDropdownPos] = useState({ top: 0, right: 0 });
-  const sortButtonRef = useRef<View>(null);
+type DropdownProps = {
+  label: string;
+  value: string;
+  options: string[];
+  onSelect: (value: string) => void;
+  placeholder?: string;
+};
 
-  // Position the modal below the button.
-  const openSortDropdown = () => {
-    sortButtonRef.current?.measureInWindow((x, y, width, height) => {
-      const screenWidth = Dimensions.get("window").width;
-      setDropdownPos({
-        top: y + height + 6,
-        right: screenWidth - (x + width),
-      });
-      setShowFilterModal(true);
-    });
-  };
+const EMPTY_VARIANT: VariantDraft = {
+  name: "",
+  unit: "per kg",
+  price: "",
+  stock: "",
+  status: "Available",
+};
+
+const formatPeso = (value: number) =>
+  Number(value || 0).toLocaleString("en-PH", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+
+// Reusable dropdown, same look as the one in Edit Product.
+const Dropdown = ({
+  label,
+  value,
+  options,
+  onSelect,
+  placeholder,
+}: DropdownProps) => {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <View className="mb-4">
+      <Text className="mb-1 text-xs text-gray-500">{label}</Text>
+
+      <TouchableOpacity
+        onPress={() => setOpen((current) => !current)}
+        disabled={options.length === 0}
+        className={`flex-row items-center justify-between rounded-[10px] border border-gray-300 px-4 py-3 ${
+          options.length === 0 ? "bg-gray-200" : "bg-gray-100"
+        }`}
+      >
+        <Text className={value ? "text-gray-800" : "text-gray-400"}>
+          {value || placeholder || `Select ${label.toLowerCase()}`}
+        </Text>
+
+        <Ionicons
+          name={open ? "chevron-up" : "chevron-down"}
+          size={18}
+          color="#374151"
+        />
+      </TouchableOpacity>
+
+      {open && (
+        <View className="mt-1 max-h-56 overflow-hidden rounded-[10px] border border-gray-300 bg-white">
+          <ScrollView nestedScrollEnabled showsVerticalScrollIndicator={false}>
+            {options.map((option) => (
+              <TouchableOpacity
+                key={option}
+                onPress={() => {
+                  onSelect(option);
+                  setOpen(false);
+                }}
+                className={`px-4 py-3 ${
+                  value === option ? "bg-[#14532d]" : "bg-white"
+                }`}
+              >
+                <Text
+                  className={value === option ? "text-white" : "text-gray-800"}
+                >
+                  {option}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+    </View>
+  );
+};
+
+const ProductScreen = ({
+  detailProductId,
+  initialViewMode = "active",
+}: ProductScreenProps) => {
+  // ================= PRODUCT DATA =================
+
+  const [viewMode, setViewMode] = useState<ViewMode>(initialViewMode);
 
   const [products, setProducts] = useState<ProductType[]>([]);
+
   const [archivedProducts, setArchivedProducts] = useState<ProductType[]>([]);
 
-  // Include archived batches here and separate them in the UI.
-  const [batchesByProduct, setBatchesByProduct] = useState<
-    Record<string, BatchType[]>
-  >({});
-
-  const [harvestsByBatch, setHarvestsByBatch] = useState<
-    Record<string, HarvestRecordType[]>
-  >({});
-
-  const [expandedBatchId, setExpandedBatchId] = useState<string | null>(null);
-
   const [user, setUser] = useState<any>(null);
+
+  // ================= UI STATE =================
+
+  const [expandedProductId, setExpandedProductId] = useState<string | null>(
+    detailProductId || null
+  );
 
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [editing, setEditing] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [savingBatch, setSavingBatch] = useState(false);
+  const [savingVariant, setSavingVariant] = useState(false);
 
-  const [selectedProduct, setSelectedProduct] =
-    useState<ProductType | null>(null);
+  // ================= SELECTED ITEMS =================
 
-  const [selectedBatch, setSelectedBatch] = useState<BatchType | null>(null);
-  const [selectedBatchUnit, setSelectedBatchUnit] = useState("");
+  const [selectedProduct, setSelectedProduct] = useState<ProductType | null>(
+    null
+  );
+
+  const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(
+    null
+  );
+
+  // ================= MODALS =================
 
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [showEditBatchModal, setShowEditBatchModal] = useState(false);
-  const [showRecordSaleModal, setShowRecordSaleModal] = useState(false);
-  const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [showVariantModal, setShowVariantModal] = useState(false);
 
-  const [recordingSale, setRecordingSale] = useState(false);
+  const [isAddingVariant, setIsAddingVariant] = useState(false);
+
+  const [variantDraft, setVariantDraft] =
+    useState<VariantDraft>(EMPTY_VARIANT);
+
+  // ================= LOAD USER =================
 
   useEffect(() => {
-    AsyncStorage.getItem("user").then((data) => {
-      if (data) {
-        setUser(JSON.parse(data));
+    const loadUser = async () => {
+      try {
+        const data = await AsyncStorage.getItem("user");
+
+        if (data) {
+          setUser(JSON.parse(data));
+        }
+      } catch (error) {
+        console.log("LOAD USER ERROR:", error);
       }
-    });
+    };
+
+    loadUser();
   }, []);
 
-  const fetchProducts = useCallback(async () => {
+  // ================= FETCH PRODUCTS =================
+
+  const fetchProducts = async () => {
+    if (!user?.uid) return;
+
     try {
       const [active, archived] = await Promise.all([
         getFarmerProducts(user.uid),
@@ -228,217 +225,351 @@ export const ProductScreen = ({
 
       setProducts(active);
       setArchivedProducts(archived);
-
-      // Include archived batches for display in the UI.
-      const allProducts = [...active, ...archived];
-
-      const batchEntries = await Promise.all(
-        allProducts.map(
-          async (p) =>
-            [
-              p.docId,
-              await getBatchesByProduct(p.docId, true),
-            ] as const
-        )
-      );
-
-      setBatchesByProduct(Object.fromEntries(batchEntries));
     } catch (error) {
-      getUserFriendlyErrorMessage(error, "Load farmer products");
+      console.log("FETCH PRODUCTS ERROR:", error);
+
+      Alert.alert("Error", "Unable to load your products. Please try again.");
     } finally {
       setLoading(false);
     }
-  }, [user]);
-
-  useEffect(() => {
-    if (user) {
-      void fetchProducts();
-    }
-  }, [user, fetchProducts]);
-
-  useEffect(() => {
-    if (
-      !detailProductId &&
-      (routeFilter === "low_stock" || routeFilter === "out_of_stock")
-    ) {
-      setViewMode("active");
-      setListFilter(routeFilter);
-    }
-  }, [detailProductId, routeFilter]);
-
-// Load active and archived products with batches.
-  // Always load the latest harvest records.
-  const loadHarvestsForBatch = async (batchId: string) => {
-    try {
-      const records = await getHarvestRecordsByBatch(batchId);
-
-      setHarvestsByBatch((prev) => ({
-        ...prev,
-        [batchId]: records,
-      }));
-    } catch (error) {
-      getUserFriendlyErrorMessage(error, "Load farmer harvest history");
-    }
   };
 
-  const getActiveBatches = (docId: string) =>
-    (batchesByProduct[docId] || []).filter((b) => !b.archived);
+  // Keep active and archived products synchronized with Firestore in real time.
+  // This listener receives changes made by addProductVariant/updateProductVariant.
+  useEffect(() => {
+    if (!user?.uid) return;
 
-  const getArchivedBatches = (docId: string) =>
-    (batchesByProduct[docId] || []).filter((b) => b.archived);
+    setLoading(true);
 
-  const getTotalStock = (docId: string) =>
-    getActiveBatches(docId)
-      .filter(
-        (b) =>
-          b.archived !== true &&
-          Number(b.stock) > 0 &&
-          b.status === "Available"
-      )
-      .reduce(
-        (sum, b) => sum + Number(b.stock || 0),
-        0
-      );
+    const unsubscribe = subscribeToFarmerProducts(
+      user.uid,
+      (farmerProducts) => {
+        setProducts(farmerProducts.filter((product) => !product.archived));
 
-  // The current selling batch is the newest active batch.
-  const getCurrentSellingBatch = (docId: string) => {
-    const batches = getActiveBatches(docId)
-      .filter(
-        (b) =>
-          b.archived !== true &&
-          Number(b.stock) > 0 &&
-          b.status === "Available"
-      )
-      .sort(
-        (a, b) =>
-          Number(a.batchNumber) -
-          Number(b.batchNumber)
-      );
+        setArchivedProducts(
+          farmerProducts.filter((product) => product.archived === true)
+        );
 
-    return batches[0] || null;
-  };
+        setLoading(false);
+      },
+      (error) => {
+        console.log("PRODUCT LISTENER ERROR:", error);
+        setLoading(false);
 
-// Save a new harvest as product or batch stock.
-  const handleAddProduct = async (
-    product: CreateProductInput,
-    quantity: number,
-    price: number,
-    forceNewBatch: boolean
+        Alert.alert("Error", "Unable to load your products. Please try again.");
+      }
+    );
+
+    return () => unsubscribe();
+  }, [user?.uid]);
+
+  // Keep the requested detail route expanded.
+
+  useEffect(() => {
+    if (detailProductId) {
+      setExpandedProductId(detailProductId);
+    }
+  }, [detailProductId]);
+
+  useEffect(() => {
+    setViewMode(initialViewMode);
+  }, [initialViewMode]);
+
+  // ================= IMAGE UPLOAD =================
+
+  // Uploads local images and keeps existing Cloudinary URLs.
+
+  const uploadProductImages = async (
+    images: string[],
+    existingPublicIds: string[] = []
   ) => {
+    const uploaded = await Promise.all(
+      images.map(async (uri, index) => {
+        if (/^https?:\/\//i.test(uri)) {
+          return {
+            imageUrl: uri,
+            publicId: existingPublicIds[index] || "",
+          };
+        }
+
+        return uploadImageAsync(uri);
+      })
+    );
+
+    return {
+      images: uploaded.map((item) => item.imageUrl),
+      imagePublicIds: uploaded.map((item) => item.publicId),
+    };
+  };
+
+  // ================= ADD PRODUCT =================
+
+  const handleAddProduct = async (product: CreateProductInput) => {
     try {
       setUploading(true);
 
-      const media = await uploadProductMedia(product);
+      if (!user?.uid) {
+        throw new Error("Farmer login information is missing.");
+      }
+
+      const selectedImages = product.images?.length
+        ? product.images
+        : product.image
+          ? [product.image]
+          : [];
+
+      const uploadedMedia = await uploadProductImages(
+        selectedImages,
+        product.imagePublicIds || []
+      );
 
       const newProduct: CreateProductInput = {
         ...product,
-        ...media,
+        image: uploadedMedia.images[0] || "",
+        imagePublicId: uploadedMedia.imagePublicIds[0] || "",
+        images: uploadedMedia.images,
+        imagePublicIds: uploadedMedia.imagePublicIds,
         farmerId: user.uid,
-        farmerName: user.fullName,
-        farmName: user.farmName,
+        farmerName: user.fullName || "",
+        farmName: user.farmName || "",
       };
 
-      const { batch } = await addHarvest(
-        newProduct,
-        quantity,
-        price,
-        forceNewBatch
-      );
+      await createProduct(newProduct);
 
       await fetchProducts();
 
-      await loadHarvestsForBatch(batch.docId);
-
       setShowAddModal(false);
-    } catch (err) {
-      throw err;
+
+      Alert.alert(
+        "Success",
+        "Your product and variants have been added successfully."
+      );
+    } catch (error: any) {
+      console.log("ADD PRODUCT ERROR:", error);
+
+      throw error;
     } finally {
       setUploading(false);
     }
   };
 
+  // ================= EDIT PRODUCT INFO =================
+
   const handleEditProduct = async (product: ProductType) => {
     try {
       setEditing(true);
 
-      const media = await uploadProductMedia(product);
+      const selectedImages = product.images?.length
+        ? product.images
+        : product.image
+          ? [product.image]
+          : [];
+
+      const uploadedMedia = await uploadProductImages(
+        selectedImages,
+        product.imagePublicIds || []
+      );
 
       await updateProductInfo({
         ...product,
-        ...media,
+        image: uploadedMedia.images[0] || "",
+        imagePublicId: uploadedMedia.imagePublicIds[0] || "",
+        images: uploadedMedia.images,
+        imagePublicIds: uploadedMedia.imagePublicIds,
       });
-
-      const previousImageIds =
-        product.imagePublicIds?.length
-          ? product.imagePublicIds
-          : product.imagePublicId
-            ? [product.imagePublicId]
-            : [];
-      const retainedImageIds = new Set(media.imagePublicIds);
-      await Promise.all(
-        previousImageIds
-          .filter((publicId) => publicId && !retainedImageIds.has(publicId))
-          .map(deleteCloudinaryImage)
-      );
 
       await fetchProducts();
 
       setShowEditModal(false);
-    } catch (err) {
-      throw err;
+      setSelectedProduct(null);
+
+      Alert.alert("Success", "Product information updated successfully.");
+    } catch (error) {
+      console.log("EDIT PRODUCT ERROR:", error);
+
+      throw error;
     } finally {
       setEditing(false);
     }
   };
 
-  // Product price, status, and restock quantity.
-  // The price applies to the whole product and all batches.
-  const handleSaveBatch = async (
-    batchDocId: string,
-    updates: {
-      price: number;
-      status: string;
-      restockQuantity: number;
-    }
-  ) => {
-    setSavingBatch(true);
+  // ================= OPEN ADD VARIANT =================
 
-    try {
-      await updateBatch(batchDocId, updates);
+  const handleOpenAddVariant = (product: ProductType) => {
+    setSelectedProduct(product);
+    setSelectedVariant(null);
 
-      await fetchProducts();
+    setVariantDraft({
+      ...EMPTY_VARIANT,
+      unit: product.unit || "per kg",
+    });
 
-      setShowEditBatchModal(false);
-
-      // Refresh the harvest list when the batch is open.
-      if (expandedBatchId === batchDocId) {
-        await loadHarvestsForBatch(batchDocId);
-      }
-    } catch (error) {
-      throw error;
-    } finally {
-      setSavingBatch(false);
-    }
+    setIsAddingVariant(true);
+    setShowVariantModal(true);
   };
 
-// Save walk-in sale and refresh stock.
-  const handleRecordSale = async (quantity: number) => {
+  // ================= OPEN EDIT VARIANT =================
+
+  const handleOpenEditVariant = (
+    product: ProductType,
+    variant: ProductVariant
+  ) => {
+    setSelectedProduct(product);
+    setSelectedVariant(variant);
+
+    setVariantDraft({
+      name: variant.name,
+      unit: variant.unit,
+      price: String(variant.price),
+      stock: String(variant.stock),
+      status: variant.status,
+    });
+
+    setIsAddingVariant(false);
+    setShowVariantModal(true);
+  };
+
+  // ================= UPDATE VARIANT FIELD =================
+
+  const updateVariantField = <K extends keyof VariantDraft>(
+    field: K,
+    value: VariantDraft[K]
+  ) => {
+    setVariantDraft((current) => ({
+      ...current,
+      [field]: value,
+    }));
+  };
+
+  // ================= SAVE VARIANT =================
+
+  const handleSaveVariant = async () => {
     if (!selectedProduct?.docId) return;
 
-    setRecordingSale(true);
+    const name = variantDraft.name.trim();
+    const unit = variantDraft.unit.trim();
+    const price = Number(variantDraft.price);
+    const stock = Number(variantDraft.stock);
+
+    if (!name || !unit) {
+      Alert.alert("Required Fields", "Please enter a variant name and unit.");
+      return;
+    }
+
+    if (
+      variantDraft.price.trim() === "" ||
+      !Number.isFinite(price) ||
+      price < 0
+    ) {
+      Alert.alert("Invalid Price", "Enter a valid price.");
+      return;
+    }
+
+    if (
+      variantDraft.stock.trim() === "" ||
+      !Number.isInteger(stock) ||
+      stock < 0
+    ) {
+      Alert.alert(
+        "Invalid Stock",
+        "Stock must be a whole number greater than or equal to zero."
+      );
+      return;
+    }
+
+    const status: ProductStatus =
+      stock <= 0 ? "Out of Stock" : variantDraft.status;
+
+    setSavingVariant(true);
 
     try {
-      await recordSale(selectedProduct.docId, quantity);
+      if (isAddingVariant) {
+        await addProductVariant(selectedProduct.docId, {
+          name,
+          unit,
+          price,
+          stock,
+          status,
+        });
+      } else {
+        if (!selectedVariant) return;
+
+        await updateProductVariant(selectedProduct.docId, selectedVariant.id, {
+          name,
+          unit,
+          price,
+          stock,
+          status,
+        });
+      }
 
       await fetchProducts();
 
-      setShowRecordSaleModal(false);
-    } catch (err) {
-      throw err;
+      setShowVariantModal(false);
+      setSelectedVariant(null);
+      setVariantDraft(EMPTY_VARIANT);
+
+      Alert.alert(
+        "Success",
+        isAddingVariant
+          ? "New variant added successfully."
+          : "Variant updated successfully."
+      );
+    } catch (error: any) {
+      console.log("SAVE VARIANT ERROR:", error);
+
+      Alert.alert(
+        "Unable to Save",
+        error?.message || "Something went wrong. Please try again."
+      );
     } finally {
-      setRecordingSale(false);
+      setSavingVariant(false);
     }
   };
+
+  // ================= DELETE VARIANT =================
+
+  const handleDeleteVariant = (
+    product: ProductType,
+    variant: ProductVariant
+  ) => {
+    Alert.alert(
+      "Delete Variant",
+      `Permanently remove "${variant.name}" from ${product.name}?`,
+      [
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              setSavingVariant(true);
+
+              await deleteProductVariant(product.docId, variant.id);
+
+              await fetchProducts();
+
+              Alert.alert("Success", "Variant deleted successfully.");
+            } catch (error: any) {
+              console.log("DELETE VARIANT ERROR:", error);
+
+              Alert.alert(
+                "Unable to Delete",
+                error?.message || "Unable to delete this variant."
+              );
+            } finally {
+              setSavingVariant(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  // ================= ARCHIVE PRODUCT =================
 
   const handleDeleteProduct = async () => {
     if (!selectedProduct?.docId) return;
@@ -453,703 +584,433 @@ export const ProductScreen = ({
       await fetchProducts();
 
       setShowDeleteModal(false);
-    } catch (err) {
-      showToast(
-        getUserFriendlyErrorMessage(
-          err,
-          "Archive farmer product",
-          "We couldn't update this product right now. Please try again."
-        )
-      );
+      setSelectedProduct(null);
+
+      Alert.alert("Success", "Product archived successfully.");
+    } catch (error) {
+      console.log("ARCHIVE PRODUCT ERROR:", error);
+
+      Alert.alert("Error", "Unable to archive this product.");
     } finally {
       setDeleting(false);
     }
   };
 
+  // ================= UNARCHIVE PRODUCT =================
+
   const handleUnarchiveProduct = (product: ProductType) => {
-    setConfirmation({
-      title: "Unarchive Product",
-      message: `Return "${product.name}" to the listing? Buyers will be able to see it again.`,
-      confirmLabel: "Unarchive",
-      onConfirm: async () => {
-        try {
-          await unarchiveProduct(product.docId);
+    Alert.alert(
+      "Unarchive Product",
+      `Ibalik sa active listing ang "${product.name}"?`,
+      [
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+        {
+          text: "Unarchive",
+          onPress: async () => {
+            try {
+              await unarchiveProduct(product.docId);
 
-          await fetchProducts();
-        } catch (err) {
-          showToast(
-            getUserFriendlyErrorMessage(
-              err,
-              "Unarchive farmer product",
-              "We couldn't update this product right now. Please try again."
-            )
-          );
-        }
-      },
-    });
+              await fetchProducts();
+
+              Alert.alert("Success", "Product restored successfully.");
+            } catch (error) {
+              console.log("UNARCHIVE ERROR:", error);
+
+              Alert.alert("Error", "Unable to restore this product.");
+            }
+          },
+        },
+      ]
+    );
   };
 
-  const handleArchiveBatchPress = (batch: BatchType) => {
-    setConfirmation({
-      title: "Archive Batch",
-      message: `Archive Batch ${String(
-        batch.batchNumber
-      ).padStart(
-        3,
-        "0"
-      )}? It will no longer be sold or visible to buyers, but you can unarchive it later.`,
-      confirmLabel: "Archive",
-      destructive: true,
-      onConfirm: async () => {
-        try {
-          await archiveBatch(batch.docId);
+  // ================= PRODUCT HELPERS =================
 
-          await fetchProducts();
-        } catch (err) {
-          showToast(
-            getUserFriendlyErrorMessage(
-              err,
-              "Archive farmer product batch",
-              "We couldn't update this batch right now. Please try again."
-            )
-          );
-        }
-      },
-    });
-  };
+  const getSellableVariants = (product: ProductType) =>
+    (product.variants || []).filter(
+      (variant) =>
+        variant.status === "Available" && Number(variant.stock) > 0
+    );
 
-  const handleUnarchiveBatch = (batch: BatchType) => {
-    setConfirmation({
-      title: "Unarchive Batch",
-      message: `Return Batch ${String(
-        batch.batchNumber
-      ).padStart(3, "0")} to active sales?`,
-      confirmLabel: "Unarchive",
-      onConfirm: async () => {
-        try {
-          await unarchiveBatch(batch.docId);
+  const getTotalStock = (product: ProductType) =>
+    getSellableVariants(product).reduce(
+      (sum, variant) => sum + Number(variant.stock || 0),
+      0
+    );
 
-          await fetchProducts();
-        } catch (err) {
-          showToast(
-            getUserFriendlyErrorMessage(
-              err,
-              "Unarchive farmer product batch",
-              "We couldn't update this batch right now. Please try again."
-            )
-          );
-        }
-      },
-    });
-  };
+  const getProductPriceRange = (product: ProductType) => {
+    const available = getSellableVariants(product);
 
-  const toggleBatchHarvests = (batchId: string) => {
-    if (expandedBatchId === batchId) {
-      setExpandedBatchId(null);
-      return;
+    const variants = available.length > 0 ? available : product.variants || [];
+
+    if (variants.length === 0) return "No price";
+
+    const prices = variants.map((variant) => Number(variant.price || 0));
+
+    const min = Math.min(...prices);
+    const max = Math.max(...prices);
+
+    if (min === max) {
+      return `₱${formatPeso(min)}`;
     }
 
-    setExpandedBatchId(batchId);
-
-    loadHarvestsForBatch(batchId);
+    return `₱${formatPeso(min)} - ₱${formatPeso(max)}`;
   };
+
+  // ================= VARIANT UNIT OPTIONS =================
+
+  // Units that match the selected product. If an older variant has a unit that
+  // is no longer in the list, it is kept so editing never wipes it out.
+  const baseUnitOptions = selectedProduct
+    ? getUnitsForProduct(
+        selectedProduct.category as ProductCategoryKey,
+        selectedProduct.name
+      )
+    : [];
+
+  const variantUnitOptions =
+    variantDraft.unit && !baseUnitOptions.includes(variantDraft.unit)
+      ? [variantDraft.unit, ...baseUnitOptions]
+      : baseUnitOptions;
+
+  // ================= LOADING =================
 
   if (loading) {
     return (
-      <View className="flex-1 items-center justify-center bg-[#f5f5f5]">
-        <ActivityIndicator color="#14532d" size="large" />
+      <View className="flex-1 items-center justify-center bg-green-800">
+        <ActivityIndicator color="#fff" size="large" />
+
+        <Text className="mt-3 text-sm text-white">Loading products...</Text>
       </View>
     );
   }
 
-  const listedProducts =
+  // ================= DISPLAYED PRODUCTS =================
+
+  const allDisplayedProducts =
     viewMode === "active" ? products : archivedProducts;
-  const filterByStock = (product: ProductType) => {
-    const stock = getTotalStock(product.docId);
-    const outOfStock = product.status === "Out of Stock" || stock <= 0;
-    if (listFilter === "low_stock") return !outOfStock && stock <= 5;
-    if (listFilter === "out_of_stock") return outOfStock;
-    return true;
-  };
-  const displayedProducts = (detailProductId
-    ? listedProducts.filter((product) => product.docId === detailProductId)
-    : listedProducts.filter(filterByStock).filter((product) =>
-        product.name.toLowerCase().includes(searchQuery.trim().toLowerCase())
-      ));
-  const selectedFilterLabel = {
-    active: "Active",
-    archived: "Archived",
-    low_stock: "Low stock",
-    out_of_stock: "Out of stock",
-  }[listFilter];
+
+  const displayedProducts = detailProductId
+    ? allDisplayedProducts.filter(
+        (product) => product.docId === detailProductId
+      )
+    : allDisplayedProducts;
+
+  // ================= UI =================
 
   return (
-    <View className="flex-1 bg-[#f5f5f5]">
-      <View className="bg-green-900 pt-14 pb-4 px-5 rounded-b-2xl flex-row items-center">
-        {detailProductId && (
-          <TouchableOpacity
-            onPress={() => router.back()}
-            className="mr-3 h-10 w-10 items-center justify-center"
-            accessibilityRole="button"
-            accessibilityLabel="Back to products"
-          >
-            <Ionicons name="arrow-back" size={22} color="white" />
-          </TouchableOpacity>
-        )}
-        <View className="flex-1">
-          <Text className="text-white font-bold text-lg">
-            {detailProductId
-              ? displayedProducts[0]?.name || "Product batches"
-              : "Product list"}
-          </Text>
+    <View className="flex-1 bg-green-700">
+      {/* HEADER */}
+
+      <View className="px-6 pb-6 pt-16">
+        <View className="flex-row items-center justify-between">
+          <View>
+            <Text className="text-[25px] font-bold text-white">
+              Product Listing
+            </Text>
+
+            <Text className="text-[15px] text-white">
+              {displayedProducts.length}{" "}
+              {viewMode === "active" ? "Products listed" : "Archived products"}
+            </Text>
+          </View>
+
+          {user?.role === "farmer" &&
+            viewMode === "active" &&
+            !detailProductId && (
+              <TouchableOpacity onPress={() => setShowAddModal(true)}>
+                <Ionicons name="add-circle" size={38} color="#fff" />
+              </TouchableOpacity>
+            )}
         </View>
-        {!detailProductId && (
-          <TouchableOpacity
-            onPress={() => setShowProductsTutorial(true)}
-            className="ml-3 h-10 w-10 items-center justify-center"
-            activeOpacity={0.8}
-            accessibilityRole="button"
-            accessibilityLabel="Open product listing tutorial"
-          >
-            <Ionicons name="play-circle-outline" size={25} color="white" />
-          </TouchableOpacity>
+
+        {/* ACTIVE / ARCHIVED TABS */}
+
+        {user?.role === "farmer" && !detailProductId && (
+          <View className="mt-4 flex-row self-start rounded-2xl bg-white/15 p-1">
+            {(["active", "archived"] as const).map((mode) => (
+              <TouchableOpacity
+                key={mode}
+                onPress={() => setViewMode(mode)}
+                className={`rounded-xl px-5 py-2 ${
+                  viewMode === mode ? "bg-white" : ""
+                }`}
+              >
+                <Text
+                  className={`text-xs font-semibold capitalize ${
+                    viewMode === mode ? "text-green-800" : "text-white"
+                  }`}
+                >
+                  {mode}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
         )}
       </View>
 
-      <View className="flex-1 px-4 pt-4">
-        {!detailProductId && user?.role === "farmer" && (
-          <View className="mb-3 flex-row items-center">
-            <View className="mr-2 flex-1 flex-row items-center rounded-[10px] border border-gray-200 bg-white px-3">
-              <Ionicons name="search-outline" size={19} color="#9ca3af" />
-              <TextInput
-                value={searchQuery}
-                onChangeText={setSearchQuery}
-                placeholder="Search products"
-                placeholderTextColor="#9ca3af"
-                className="ml-2 flex-1 py-3 text-gray-800"
-                returnKeyType="search"
-              />
-              {!!searchQuery && (
-                <TouchableOpacity onPress={() => setSearchQuery("")}>
-                  <Ionicons name="close-circle" size={18} color="#9ca3af" />
-                </TouchableOpacity>
-              )}
-            </View>
-            <TouchableOpacity
-              ref={sortButtonRef}
-              onPress={() => (showFilterModal ? setShowFilterModal(false) : openSortDropdown())}
-              className="flex-row items-center rounded-[10px] border border-gray-200 bg-white px-3 py-3"
-              accessibilityRole="button"
-              accessibilityLabel={`Sort by ${selectedFilterLabel}`}
-            >
-              <MaterialIcons name="sort" size={19} color="#14532d" />
-              <Text className="ml-1.5 text-xs font-semibold text-gray-700">
-                Sort by: {selectedFilterLabel}
-              </Text>
-            </TouchableOpacity>
-          </View>
-        )}
+      {/* PRODUCT LIST */}
+
+      <View className="flex-1 rounded-t-[35px] bg-gray-100 px-6 pt-6">
         <ScrollView
           showsVerticalScrollIndicator={false}
-          contentContainerStyle={{
-            paddingBottom: detailProductId
-              ? getFarmerScreenBottomPadding(insets.bottom)
-              : getFarmerTabBarClearance(insets.bottom) + 72,
-          }}
+          contentContainerStyle={{ paddingBottom: 35 }}
         >
           {displayedProducts.length === 0 && (
-            <Text className="mt-10 text-center text-gray-500">
-              {detailProductId
-                ? "This product could not be found."
-                : searchQuery.trim()
-                ? "No products match your search."
-                : listFilter === "low_stock"
-                ? "No low-stock products."
-                : listFilter === "out_of_stock"
-                ? "No out-of-stock products."
-                : listFilter === "archived"
-                ? "No archived products."
-                : "No products available"}
-            </Text>
+            <View className="items-center py-12">
+              <Ionicons name="leaf-outline" size={45} color="#9ca3af" />
+
+              <Text className="mt-3 text-center text-sm text-gray-500">
+                {viewMode === "active"
+                  ? "No products available."
+                  : "No archived products."}
+              </Text>
+            </View>
           )}
 
           {displayedProducts.map((product) => {
-            const activeBatches = getActiveBatches(
-              product.docId
-            );
+            const variants = product.variants || [];
 
-            const archivedBatches = getArchivedBatches(
-              product.docId
-            );
+            const totalStock = getTotalStock(product);
 
-            const currentBatch =
-              getCurrentSellingBatch(product.docId);
-
-            const totalStock = getTotalStock(
-              product.docId
-            );
-
-            const isExpanded = detailProductId === product.docId;
+            const isExpanded = expandedProductId === product.docId;
 
             return (
               <View
                 key={product.docId}
-                className={`mb-3 rounded-[10px] bg-white p-3 ${
-                  viewMode === "archived"
-                    ? "opacity-70"
-                    : ""
+                className={`mb-4 rounded-2xl bg-white p-4 ${
+                  viewMode === "archived" ? "opacity-75" : ""
                 }`}
               >
-                {!detailProductId ? (
-                  <>
-                    <View className="flex-row items-center">
-                      <TouchableOpacity
-                        onPress={() =>
-                          router.push({
-                            pathname: "/farmer/products/[id]",
-                            params: {
-                              id: product.docId,
-                              mode: viewMode,
-                            },
-                          })
-                        }
-                        className="flex-1 flex-row items-center"
-                        activeOpacity={0.8}
-                        accessibilityRole="button"
-                        accessibilityLabel={`View batches for ${product.name}`}
-                      >
-                        {product.image ? (
-                          <Image
-                            source={{ uri: product.image }}
-                            className="h-[72px] w-[72px] rounded-[10px]"
-                          />
-                        ) : (
-                          <View className="h-[72px] w-[72px] items-center justify-center rounded-[10px] bg-gray-100">
-                            <Ionicons
-                              name="leaf-outline"
-                              size={24}
-                              color="#9ca3af"
-                            />
-                          </View>
+                {/* PRODUCT INFORMATION */}
 
-                        )}
-                        <View className="ml-3 flex-1">
-                          <Text
-                            className="text-base font-bold text-gray-900"
-                            numberOfLines={1}
-                          >
-                            {product.name}
-                          </Text>
-                          <Text className="mt-1 text-sm text-gray-500">
-                            {totalStock} {product.unit} in stock
-                          </Text>
-                          <Text className="mt-1 text-sm font-semibold text-gray-800">
-                            ₱{Number(product.price || 0).toFixed(2)} /{" "}
-                            {product.unit.replace(/^per /, "")}
-                          </Text>
-                        </View>
-                        <Ionicons
-                          name="chevron-forward"
-                          size={20}
-                          color="#9ca3af"
-                        />
-                      </TouchableOpacity>
-                    </View>
-
-                    {user?.role === "farmer" && (
-                      <View className="mt-3 flex-row border-t border-gray-100 pt-2">
-                        {viewMode === "active" ? (
-                          <>
-                            <TouchableOpacity
-                              onPress={() => {
-                                setSelectedProduct(product);
-                                setShowRecordSaleModal(true);
-                              }}
-                              className="flex-1 flex-row items-center justify-center py-2"
-                              accessibilityRole="button"
-                              accessibilityLabel={`Record sale for ${product.name}`}
-                            >
-                              <Ionicons
-                                name="storefront-outline"
-                                size={17}
-                                color="#14532d"
-                              />
-                              <View className="ml-1.5 items-center">
-                                <Text className="text-[11px] font-semibold text-gray-700">
-                                  Record sale
-                                </Text>
-                                <Text className="text-[9px] text-gray-500">(Itala ang Benta)</Text>
-                              </View>
-                            </TouchableOpacity>
-                            <TouchableOpacity
-                              onPress={() => {
-                                setSelectedProduct(product);
-                                setShowEditModal(true);
-                              }}
-                              className="flex-1 flex-row items-center justify-center py-2"
-                              accessibilityRole="button"
-                              accessibilityLabel={`Edit ${product.name}`}
-                            >
-                              <MaterialIcons
-                                name="edit"
-                                size={17}
-                                color="#14532d"
-                              />
-                              <View className="ml-1.5 items-center">
-                                <Text className="text-[11px] font-semibold text-gray-700">
-                                  Edit
-                                </Text>
-                                <Text className="text-[9px] text-gray-500">(I-edit)</Text>
-                              </View>
-                            </TouchableOpacity>
-                            <TouchableOpacity
-                              onPress={() => {
-                                setSelectedProduct(product);
-                                setShowDeleteModal(true);
-                              }}
-                              className="flex-1 flex-row items-center justify-center py-2"
-                              accessibilityRole="button"
-                              accessibilityLabel={`Archive ${product.name}`}
-                            >
-                              <MaterialIcons
-                                name="archive"
-                                size={17}
-                                color="#b45309"
-                              />
-                              <View className="ml-1.5 items-center">
-                                <Text className="text-[11px] font-semibold text-gray-700">
-                                  Archive
-                                </Text>
-                                <Text className="text-[9px] text-gray-500">(I-archive)</Text>
-                              </View>
-                            </TouchableOpacity>
-                          </>
-                        ) : (
-                          <TouchableOpacity
-                            onPress={() => handleUnarchiveProduct(product)}
-                            className="flex-row items-center py-2"
-                            accessibilityRole="button"
-                          >
-                            <Ionicons
-                              name="refresh-outline"
-                              size={17}
-                              color="#14532d"
-                            />
-                            <View className="ml-1.5 items-start">
-                              <Text className="text-[11px] font-semibold text-gray-700">
-                                Restore product
-                              </Text>
-                              <Text className="text-[9px] text-gray-500">(Ibalik ang Produkto)</Text>
-                            </View>
-                          </TouchableOpacity>
-                        )}
-                      </View>
-                    )}
-                  </>
-                ) : (
-                  <View className="flex-row items-center">
-                    {product.image ? (
-                      <Image
-                        source={{ uri: product.image }}
-                        className="h-20 w-20 rounded-[10px]"
+                <View className="flex-row items-center">
+                  {product.image ? (
+                    <Image
+                      source={{ uri: product.image }}
+                      className="h-20 w-20 rounded-xl"
+                    />
+                  ) : (
+                    <View className="h-20 w-20 items-center justify-center rounded-xl bg-gray-200">
+                      <Ionicons
+                        name="image-outline"
+                        size={28}
+                        color="#9ca3af"
                       />
-                    ) : (
-                      <View className="h-20 w-20 rounded-[10px] bg-gray-100" />
-                    )}
-                    <View className="ml-4 flex-1">
-                      <Text className="text-xs text-gray-500">
-                        {product.farmName}
-                      </Text>
-                      <Text className="mt-1 text-sm text-gray-600">
-                        {totalStock} {product.unit} available ·{" "}
-                        {activeBatches.length} active{" "}
-                        {activeBatches.length === 1 ? "batch" : "batches"}
-                      </Text>
-                      <Text className="mt-1 font-bold text-gray-900">
-                        ₱{Number(product.price || 0).toFixed(2)} /{" "}
-                        {product.unit.replace(/^per /, "")}
-                      </Text>
                     </View>
-                    {user?.role === "farmer" && viewMode === "active" && (
+                  )}
+
+                  <View className="ml-3 flex-1">
+                    <Text className="text-xs text-gray-400">
+                      {product.farmName}
+                    </Text>
+
+                    <Text className="font-semibold text-gray-800">
+                      {product.name}
+                    </Text>
+
+                    <Text className="text-xs text-gray-500">
+                      {product.category}
+                    </Text>
+
+                    <Text className="mt-1 text-xs text-gray-600">
+                      {totalStock.toLocaleString()} available stock
+                    </Text>
+
+                    <Text className="mt-1 font-bold text-gray-800">
+                      {getProductPriceRange(product)}
+                    </Text>
+
+                    {product.totalReviews > 0 && (
+                      <Text className="mt-1 text-xs text-yellow-600">
+                        ★ {Number(product.rating || 0).toFixed(1)} (
+                        {product.totalReviews} reviews)
+                      </Text>
+                    )}
+                  </View>
+
+                  {/* PRODUCT ACTIONS */}
+
+                  {user?.role === "farmer" && viewMode === "active" && (
+                    <View className="items-center gap-2">
                       <TouchableOpacity
+                        className="rounded-lg bg-blue-100 p-2"
                         onPress={() => {
                           setSelectedProduct(product);
                           setShowEditModal(true);
                         }}
-                        className="h-10 w-10 items-center justify-center rounded-[10px] bg-gray-50"
-                        accessibilityRole="button"
-                        accessibilityLabel={`Edit ${product.name}`}
                       >
-                        <MaterialIcons name="edit" size={18} color="#14532d" />
+                        <MaterialIcons
+                          name="edit"
+                          size={18}
+                          color="#2563eb"
+                        />
                       </TouchableOpacity>
-                    )}
-                  </View>
-                )}
+
+                      <TouchableOpacity
+                        className="rounded-lg bg-orange-100 p-2"
+                        onPress={() => {
+                          setSelectedProduct(product);
+                          setShowDeleteModal(true);
+                        }}
+                      >
+                        <MaterialIcons
+                          name="archive"
+                          size={18}
+                          color="#c2410c"
+                        />
+                      </TouchableOpacity>
+                    </View>
+                  )}
+
+                  {user?.role === "farmer" && viewMode === "archived" && (
+                    <TouchableOpacity
+                      className="rounded-lg bg-green-100 px-3 py-2"
+                      onPress={() => handleUnarchiveProduct(product)}
+                    >
+                      <Text className="text-xs font-semibold text-green-700">
+                        Unarchive
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+
+                {/* VARIANT TOGGLE */}
+
+                <TouchableOpacity
+                  onPress={() =>
+                    setExpandedProductId(isExpanded ? null : product.docId)
+                  }
+                  className="mt-3 flex-row items-center justify-center border-t border-gray-100 py-3"
+                >
+                  <Text className="mr-1 text-xs font-semibold text-green-700">
+                    {isExpanded
+                      ? "Hide Variants"
+                      : `Manage Variants (${variants.length})`}
+                  </Text>
+
+                  <Ionicons
+                    name={isExpanded ? "chevron-up" : "chevron-down"}
+                    size={14}
+                    color="#15803d"
+                  />
+                </TouchableOpacity>
+
+                {/* VARIANT LIST */}
 
                 {isExpanded && (
-                  <View className="mt-2">
-                    <Text className="mb-3 mt-2 text-base font-bold text-gray-900">
-                      Batches
-                    </Text>
-                    {activeBatches.length === 0 &&
-                      archivedBatches.length === 0 && (
-                        <Text className="text-gray-400 text-xs text-center py-2">
-                          No batches yet
-                        </Text>
-                      )}
+                  <View className="mt-1">
+                    {variants.length === 0 && (
+                      <Text className="py-3 text-center text-xs text-gray-400">
+                        No variants added.
+                      </Text>
+                    )}
 
-
-                    {activeBatches.map((batch) => {
-                      const isCurrent =
-                        currentBatch?.docId ===
-                        batch.docId;
-
-                      const harvests =
-                        harvestsByBatch[
-                          batch.docId
-                        ] || [];
-
-                      const harvestsExpanded =
-                        expandedBatchId ===
-                        batch.docId;
+                    {variants.map((variant) => {
+                      const isAvailable =
+                        variant.status === "Available" &&
+                        Number(variant.stock) > 0;
 
                       return (
                         <View
-                          key={batch.docId}
-                          className="mb-2 rounded-[10px] bg-gray-50 p-3"
+                          key={variant.id}
+                          className="mb-2 rounded-xl bg-gray-50 p-3"
                         >
                           <View className="flex-row items-center justify-between">
                             <View className="flex-1">
+                              <Text className="font-semibold text-gray-800">
+                                {variant.name}
+                              </Text>
 
-                              <View className="flex-row items-center flex-wrap">
-                                <Text className="text-sm font-bold text-gray-800">
-                                  Batch{" "}
-                                  {String(
-                                    batch.batchNumber
-                                  ).padStart(
-                                    3,
-                                    "0"
-                                  )}
+                              <Text className="mt-1 text-xs text-gray-600">
+                                ₱{formatPeso(variant.price)} /{" "}
+                                {variant.unit.replace(/^per\s+/i, "")}
+                              </Text>
+
+                              <Text className="mt-1 text-xs text-gray-600">
+                                Stock: {variant.stock} {variant.unit}
+                              </Text>
+
+                              <View
+                                className={`mt-2 self-start rounded-full px-2 py-1 ${
+                                  isAvailable ? "bg-green-100" : "bg-red-100"
+                                }`}
+                              >
+                                <Text
+                                  className={`text-[10px] font-semibold ${
+                                    isAvailable
+                                      ? "text-green-700"
+                                      : "text-red-600"
+                                  }`}
+                                >
+                                  {isAvailable ? "Available" : "Out of Stock"}
                                 </Text>
-
-                                {isCurrent && (
-                                  <View className="ml-2 rounded-full bg-green-50 px-2 py-0.5">
-                                    <Text className="text-[11px] font-semibold text-[#14532d]">
-                                      Selling now
-                                    </Text>
-                                  </View>
-                                )}
                               </View>
-
-
-                              <Text className="mt-1 text-sm text-gray-700">
-                                Stock: {batch.stock} {product.unit}
-                              </Text>
-                              <Text className="mt-0.5 text-xs text-gray-500">
-                                ₱{Number(product.price || 0).toFixed(2)} per{" "}
-                                {product.unit.replace(/^per /, "")} · {batch.status}
-                              </Text>
-
-
-                              <Text className="mt-1 text-xs text-gray-500">
-                                Total harvested:{" "}
-                                {batch.totalHarvested}{" "}
-                                {product.unit}
-                              </Text>
                             </View>
 
+                            {/* VARIANT ACTIONS */}
 
-                            {user?.role ===
-                              "farmer" && (
-                              <View className="flex-row">
-
-                                <TouchableOpacity
-                                  className="mr-2 flex-row items-center rounded-[10px] bg-white px-3 py-2"
-                                  accessibilityRole="button"
-                                  accessibilityLabel={`Edit batch ${batch.batchNumber}`}
-                                  onPress={() => {
-                                    setSelectedBatch(
-                                      batch
-                                    );
-                                    setSelectedBatchUnit(product.unit);
-
-                                    setShowEditBatchModal(
-                                      true
-                                    );
-                                  }}
-                                >
-                                  <MaterialIcons
-                                    name="edit"
-                                    size={17}
-                                    color="#14532d"
-                                  />
-                                  <Text className="ml-1 text-xs font-semibold text-gray-700">
-                                    Edit
-                                  </Text>
-                                </TouchableOpacity>
-
-
-                                <TouchableOpacity
-                                  className="flex-row items-center rounded-[10px] bg-white px-3 py-2"
-                                  accessibilityRole="button"
-                                  accessibilityLabel={`Archive batch ${batch.batchNumber}`}
-                                  onPress={() =>
-                                    handleArchiveBatchPress(
-                                      batch
-                                    )
-                                  }
-                                >
-                                  <MaterialIcons
-                                    name="archive"
-                                    size={17}
-                                    color="#b45309"
-                                  />
-                                  <Text className="ml-1 text-xs font-semibold text-gray-700">
-                                    Archive
-                                  </Text>
-                                </TouchableOpacity>
-                              </View>
-                            )}
-                          </View>
-
-
-                          <TouchableOpacity
-                            onPress={() =>
-                              toggleBatchHarvests(
-                                batch.docId
-                              )
-                            }
-                            className="mt-3 flex-row items-center py-1"
-                            accessibilityRole="button"
-                          >
-                            <Text className="mr-1 text-xs font-semibold text-gray-700">
-                              {harvestsExpanded
-                                ? "Hide harvests"
-                                : "View harvests"}
-                            </Text>
-
-                            <Ionicons
-                              name={
-                                harvestsExpanded
-                                  ? "chevron-up"
-                                  : "chevron-down"
-                              }
-                              size={16}
-                              color="#14532d"
-                            />
-                          </TouchableOpacity>
-
-
-                          {harvestsExpanded && (
-                            <View className="mt-2 pl-2 border-l-2 border-gray-200">
-                              <Text className="mb-1 text-[10px] text-gray-400">
-                                Harvest records are saved for your sales history and cannot be deleted.
-                              </Text>
-                              {harvests.length ===
-                                0 && (
-                                <Text className="py-1 text-xs text-gray-500">
-                                  No harvest records yet
-                                </Text>
-                              )}
-
-                              {harvests.map((h) => {
-                                // Newer records carry a type of either "harvest" or "restock".
-                                const recordType = (
-                                  h as HarvestRecordType & {
-                                    type?: string;
-                                  }
-                                ).type;
-
-                                return (
-                                  <View
-                                    key={h.docId}
-                                    className="flex-row items-center justify-between py-2"
+                            {user?.role === "farmer" &&
+                              viewMode === "active" && (
+                                <View className="flex-row gap-2">
+                                  <TouchableOpacity
+                                    className="rounded-lg bg-blue-100 p-2"
+                                    onPress={() =>
+                                      handleOpenEditVariant(product, variant)
+                                    }
                                   >
-                                  <Text className="flex-1 text-xs text-gray-600">
-                                      {recordType ===
-                                      "restock"
-                                        ? `${formatDate(
-                                            h.harvestDate
-                                          )} · Restock (${h.quantity} product/ ${product.unit})`
-                                        : `${formatDate(
-                                            h.harvestDate
-                                          )} · ${h.quantity} added/${product.unit} (${h.remainingQuantity} last stock)`}
-                                    </Text>
+                                    <MaterialIcons
+                                      name="edit"
+                                      size={16}
+                                      color="#2563eb"
+                                    />
+                                  </TouchableOpacity>
 
-                                  </View>
-                                );
-                              })}
-                            </View>
-                          )}
+                                  <TouchableOpacity
+                                    className="rounded-lg bg-red-100 p-2"
+                                    onPress={() =>
+                                      handleDeleteVariant(product, variant)
+                                    }
+                                  >
+                                    <MaterialIcons
+                                      name="delete-outline"
+                                      size={17}
+                                      color="#dc2626"
+                                    />
+                                  </TouchableOpacity>
+                                </View>
+                              )}
+                          </View>
                         </View>
                       );
                     })}
 
+                    {/* ADD VARIANT */}
 
-                    {archivedBatches.length > 0 && (
-                      <View className="mt-1">
-                        <Text className="mb-2 text-sm font-semibold text-gray-700">
-                          Archived Batches
+                    {user?.role === "farmer" && viewMode === "active" && (
+                      <TouchableOpacity
+                        onPress={() => handleOpenAddVariant(product)}
+                        className="mt-1 flex-row items-center justify-center rounded-xl border border-dashed border-[#14532d] py-3"
+                      >
+                        <Ionicons
+                          name="add-circle-outline"
+                          size={17}
+                          color="#14532d"
+                        />
+
+                        <Text className="ml-2 text-xs font-semibold text-[#14532d]">
+                          Add Another Variant
                         </Text>
+                      </TouchableOpacity>
+                    )}
 
-                        {viewMode ===
-                          "archived" && (
-                          <Text className="mb-2 text-sm text-gray-500">
-                            This entire product is archived, so its batches are also
-                            locked. Unarchive the product first before unarchiving any batch.
-                          </Text>
-                        )}
-
-                        {archivedBatches.map(
-                          (batch) => (
-                            <View
-                              key={batch.docId}
-                              className="mb-2 rounded-[10px] bg-gray-50 p-3"
-                            >
-                              <View className="flex-row items-center justify-between">
-                                <View className="flex-1">
-                                  <Text className="text-sm font-semibold text-gray-700">
-                                    Batch{" "}
-                                    {String(
-                                      batch.batchNumber
-                                    ).padStart(
-                                      3,
-                                      "0"
-                                    )}{" "}
-                                    (archived)
-                                  </Text>
-
-                                  <Text className="mt-1 text-xs text-gray-500">
-                                    {batch.stock}{" "}
-                                    {product.unit}{" "}
-                                    · {batch.status}
-                                  </Text>
-                                </View>
-
-
-                                {user?.role ===
-                                  "farmer" &&
-                                  viewMode ===
-                                    "active" && (
-                                    <TouchableOpacity
-                                      className="flex-row items-center rounded-[10px] bg-green-50 px-3 py-2"
-                                      onPress={() =>
-                                        handleUnarchiveBatch(
-                                          batch
-                                        )
-                                      }
-                                      accessibilityRole="button"
-                                    >
-                                      <Text className="text-xs font-semibold text-[#14532d]">
-                                        Unarchive
-                                      </Text>
-                                    </TouchableOpacity>
-                                  )}
-                              </View>
-                            </View>
-                          )
-                        )}
-                      </View>
+                    {viewMode === "archived" && (
+                      <Text className="mt-2 text-center text-[10px] text-gray-400">
+                        Unarchive this product to manage its variants.
+                      </Text>
                     )}
                   </View>
                 )}
@@ -1159,189 +1020,202 @@ export const ProductScreen = ({
         </ScrollView>
       </View>
 
-      {!detailProductId && user?.role === "farmer" && viewMode === "active" && (
-        <TouchableOpacity
-          onPress={() => setShowAddModal(true)}
-          className="absolute right-5 h-14 w-14 items-center justify-center rounded-full"
-          style={{
-            backgroundColor: "#14532d",
-            bottom: getFarmerTabBarClearance(insets.bottom),
-            elevation: 8,
-            shadowColor: "#000",
-            shadowOffset: { width: 0, height: 3 },
-            shadowOpacity: 0.24,
-            shadowRadius: 5,
-          }}
-          accessibilityRole="button"
-          accessibilityLabel="Add product"
-        >
-          <Ionicons name="add" size={30} color="white" />
-        </TouchableOpacity>
-      )}
-
-      {/* The sort menu uses the same anchored design and options as the farm profile
-          sort. */}
-      <Modal
-        visible={showFilterModal}
-        transparent
-        animationType="fade"
-        statusBarTranslucent
-        onRequestClose={() => setShowFilterModal(false)}
-      >
-        <TouchableOpacity
-          activeOpacity={1}
-          style={{ flex: 1 }}
-          onPress={() => setShowFilterModal(false)}
-        >
-          <View
-            className="absolute bg-white rounded-[14px] py-1.5"
-            style={{
-              top: dropdownPos.top,
-              right: dropdownPos.right,
-              width: 180,
-              overflow: "hidden",
-              shadowColor: "#000",
-              shadowOffset: { width: 0, height: 4 },
-              shadowOpacity: 0.12,
-              shadowRadius: 10,
-              elevation: 8,
-            }}
-          >
-            {FILTER_OPTIONS.map((opt) => {
-              const active = listFilter === opt.value;
-              return (
-                <TouchableOpacity
-                  key={opt.value}
-                  onPress={() => {
-                    setListFilter(opt.value);
-                    setViewMode(opt.value === "archived" ? "archived" : "active");
-                    setShowFilterModal(false);
-                  }}
-                  className={`flex-row items-center justify-between px-3.5 py-2.5 ${
-                    active ? "bg-green-50" : ""
-                  }`}
-                >
-                  <View className="flex-row items-center gap-2">
-                    <Ionicons
-                      name={opt.icon as any}
-                      size={16}
-                      color={active ? "#14532d" : "#6b7280"}
-                    />
-                    <Text
-                      className={`text-xs font-semibold ${
-                        active ? "text-green-900" : "text-gray-700"
-                      }`}
-                    >
-                      {opt.label}
-                    </Text>
-                  </View>
-                  {active && <Ionicons name="checkmark-circle" size={16} color="#14532d" />}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </TouchableOpacity>
-      </Modal>
-
+      {/* ADD PRODUCT MODAL */}
 
       <AddProductModal
         visible={showAddModal}
         onClose={() => setShowAddModal(false)}
         onSave={handleAddProduct}
         loading={uploading}
-        farmerId={user?.uid}
-        farmerName={user?.fullName}
-        farmName={user?.farmName}
+        farmerId={user?.uid || ""}
+        farmerName={user?.fullName || ""}
+        farmName={user?.farmName || ""}
       />
+
+      {/* EDIT PRODUCT MODAL */}
 
       {selectedProduct && (
         <EditProductModal
           visible={showEditModal}
           product={selectedProduct}
-          onClose={() => setShowEditModal(false)}
+          onClose={() => {
+            setShowEditModal(false);
+            setSelectedProduct(null);
+          }}
           onSave={handleEditProduct}
           loading={editing}
         />
       )}
 
-      <EditBatchModal
-        visible={showEditBatchModal}
-        batch={selectedBatch}
-        unit={selectedBatchUnit}
-        onClose={() => setShowEditBatchModal(false)}
-        onSave={handleSaveBatch}
-        loading={savingBatch}
-      />
+      {/* ARCHIVE PRODUCT MODAL */}
 
       <DeleteProductModal
         visible={showDeleteModal}
         product={selectedProduct}
-        onCancel={() => setShowDeleteModal(false)}
+        onCancel={() => {
+          setShowDeleteModal(false);
+          setSelectedProduct(null);
+        }}
         onConfirm={handleDeleteProduct}
         loading={deleting}
       />
 
-      <RecordSaleModal
-        visible={showRecordSaleModal}
-        product={selectedProduct}
-        onClose={() => setShowRecordSaleModal(false)}
-        onConfirm={handleRecordSale}
-        loading={recordingSale}
-      />
+      {/* ADD / EDIT VARIANT MODAL */}
 
       <Modal
-        visible={confirmation !== null}
+        visible={showVariantModal}
         transparent
         animationType="fade"
         statusBarTranslucent
-        onRequestClose={() => setConfirmation(null)}
+        onRequestClose={() => setShowVariantModal(false)}
       >
-        <View className="flex-1 items-center justify-center bg-black/40 px-6">
-          <View className="w-full max-w-[340px] rounded-[10px] bg-white p-6">
-            <Text className="mb-2 text-lg font-semibold text-gray-800">
-              {confirmation?.title}
-            </Text>
-            <Text className="text-sm leading-5 text-gray-600">
-              {confirmation?.message}
-            </Text>
-            <View className="mt-6 flex-row justify-between">
-              <TouchableOpacity
-                className="mr-2 flex-1 items-center rounded-[10px] bg-gray-200 px-4 py-3"
-                onPress={() => setConfirmation(null)}
-              >
-                <Text className="font-semibold text-gray-700">Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                className="ml-2 flex-1 items-center rounded-[10px] px-4 py-3"
-                style={{
-                  backgroundColor: confirmation?.destructive
-                    ? "#dc2626"
-                    : "#14532d",
+        <View className="flex-1 justify-center bg-black/40 px-6">
+          <View className="max-h-[85%] rounded-[15px] bg-white p-5">
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              <View className="mb-4 flex-row items-center">
+                <View className="mr-3 h-10 w-10 items-center justify-center rounded-xl bg-green-50">
+                  <Ionicons name="layers-outline" size={21} color="#14532d" />
+                </View>
+
+                <View className="flex-1">
+                  <Text className="text-lg font-bold text-gray-900">
+                    {isAddingVariant ? "Add Variant" : "Edit Variant"}
+                  </Text>
+
+                  <Text className="text-xs text-gray-500">
+                    {selectedProduct?.name}
+                  </Text>
+                </View>
+              </View>
+
+              {/* VARIANT NAME */}
+
+              <Text className="mb-1 text-xs text-gray-500">
+                VARIANT NAME / SIZE
+              </Text>
+
+              <TextInput
+                value={variantDraft.name}
+                onChangeText={(value) => updateVariantField("name", value)}
+                placeholder="Small, Medium, Large"
+                className="mb-4 rounded-[10px] border border-gray-300 bg-gray-100 px-4 py-3 text-gray-800"
+              />
+
+              {/* UNIT */}
+
+              <Dropdown
+                label="UNIT"
+                value={variantDraft.unit}
+                options={variantUnitOptions}
+                onSelect={(value) => updateVariantField("unit", value)}
+                placeholder="Select unit"
+              />
+
+              {/* PRICE */}
+
+              <Text className="mb-1 text-xs text-gray-500">PRICE (₱)</Text>
+
+              <TextInput
+                value={variantDraft.price}
+                onChangeText={(value) => {
+                  if (/^\d*\.?\d*$/.test(value)) {
+                    updateVariantField("price", value);
+                  }
                 }}
-                onPress={() => {
-                  const action = confirmation?.onConfirm;
-                  setConfirmation(null);
-                  if (action) void action();
+                keyboardType="decimal-pad"
+                placeholder="0.00"
+                className="mb-4 rounded-[10px] border border-gray-300 bg-gray-100 px-4 py-3 text-gray-800"
+              />
+
+              {/* STOCK */}
+
+              <Text className="mb-1 text-xs text-gray-500">STOCK</Text>
+
+              <TextInput
+                value={variantDraft.stock}
+                onChangeText={(value) => {
+                  if (/^\d*$/.test(value)) {
+                    updateVariantField("stock", value);
+                  }
                 }}
-              >
-                <Text className="font-semibold text-white">
-                  {confirmation?.confirmLabel}
+                keyboardType="numeric"
+                placeholder="0"
+                className="mb-4 rounded-[10px] border border-gray-300 bg-gray-100 px-4 py-3 text-gray-800"
+              />
+
+              {/* STATUS */}
+
+              <Text className="mb-2 text-xs text-gray-500">STATUS</Text>
+
+              <View className="mb-5 flex-row gap-2">
+                {(["Available", "Out of Stock"] as const).map((status) => (
+                  <TouchableOpacity
+                    key={status}
+                    disabled={
+                      Number(variantDraft.stock) <= 0 && status === "Available"
+                    }
+                    onPress={() => updateVariantField("status", status)}
+                    className={`flex-1 rounded-[10px] border px-2 py-3 ${
+                      variantDraft.status === status
+                        ? "border-[#14532d] bg-[#14532d]"
+                        : "border-gray-300 bg-white"
+                    }`}
+                  >
+                    <Text
+                      className={`text-center text-xs font-semibold ${
+                        variantDraft.status === status
+                          ? "text-white"
+                          : "text-gray-700"
+                      }`}
+                    >
+                      {status}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {Number(variantDraft.stock) <= 0 && (
+                <Text className="mb-4 text-xs text-orange-600">
+                  A variant with zero stock will automatically be Out of Stock.
                 </Text>
-              </TouchableOpacity>
-            </View>
+              )}
+
+              {/* BUTTONS */}
+
+              <View className="flex-row justify-between">
+                <TouchableOpacity
+                  onPress={() => setShowVariantModal(false)}
+                  disabled={savingVariant}
+                  className="w-[48%] items-center rounded-[10px] border border-[#14532d] py-3"
+                >
+                  <Text className="font-semibold text-[#14532d]">Cancel</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={handleSaveVariant}
+                  disabled={savingVariant}
+                  className="w-[48%] items-center rounded-[10px] bg-[#14532d] py-3"
+                >
+                  {savingVariant ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text className="font-bold text-white">Save Variant</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
           </View>
         </View>
       </Modal>
-      <FarmerTutorialVideoModal
-        tutorial="products"
-        title="Product listing tutorial"
-        visible={showProductsTutorial}
-        onClose={() => setShowProductsTutorial(false)}
-      />
     </View>
   );
 };
 
-export default function Product() {
-  return <ProductScreen />;
-}
+// Named export for the farmer product detail route.
+
+export { ProductScreen };
+
+export default ProductScreen;

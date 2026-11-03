@@ -25,6 +25,9 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useToast } from "@/src/context/ToastContext";
 import { getUserFriendlyErrorMessage } from "@/src/utils/userFacingError";
 import { getFarmerScreenBottomPadding } from "@/src/constants/farmerLayout";
+import QRCode from "react-native-qrcode-svg";
+import ViewShot from "react-native-view-shot";
+import * as MediaLibrary from "expo-media-library";
 
 const STATUS_BAR = Constants.statusBarHeight ?? 44;
 const DARK_GREEN = "#14532d";
@@ -50,6 +53,13 @@ const FarmProfile = () => {
   const [farmerUser, setFarmerUser] = useState<any>(null);
   const [buyerId, setBuyerId] = useState("");
   const [isFavorited, setIsFavorited] = useState(false);
+  const [farmQrVisible, setFarmQrVisible] = useState(false);
+  const [qrSaving, setQrSaving] = useState(false);
+  const [qrSaved, setQrSaved] = useState(false);
+
+  // Captures this farmer's QR card for saving to the buyer's gallery.
+  const qrRef = useRef<any>(null);
+  const farmQrValue = farmerId ? `client://farm/${farmerId}` : "";
 
   const [activeCategory, setActiveCategory] = useState("All");
   const [sortBy, setSortBy] = useState("All");
@@ -72,7 +82,7 @@ const FarmProfile = () => {
   };
 
   // Taken from the farmer's own products, which is the source of truth.
-  const farmName = products[0]?.farmName || "Farm";
+  const farmName = products[0]?.farmName || farmerUser?.farmName || "Farm";
   const farmerName = products[0]?.farmerName || farmerUser?.fullName || "";
 
   useEffect(() => {
@@ -108,7 +118,7 @@ const FarmProfile = () => {
     load();
   }, [farmerId]);
 
-// Save or remove this farm from favorites.
+  // Save or remove this farm from favorites.
   const toggleFavorite = async () => {
     if (!buyerId || !farmerId) return;
     try {
@@ -136,6 +146,50 @@ const FarmProfile = () => {
           "We couldn't update your saved farms. Please try again."
         )
       );
+    }
+  };
+
+  // Saves the QR code for the currently viewed farmer to the buyer's gallery.
+  const handleDownloadFarmQr = async () => {
+    if (qrSaving) return;
+
+    if (!farmerId || !qrRef.current) {
+      showToast("The farm QR code is not ready. Please try again.");
+      return;
+    }
+
+    try {
+      setQrSaving(true);
+      setQrSaved(false);
+
+      const permission = await MediaLibrary.requestPermissionsAsync(true);
+
+      if (!permission.granted) {
+        showToast("Gallery permission denied. Allow photo access to save the QR code.");
+        return;
+      }
+
+      const uri = await qrRef.current.capture();
+
+      if (!uri) {
+        throw new Error("Unable to capture the farm QR code.");
+      }
+
+      await MediaLibrary.saveToLibraryAsync(uri);
+
+      // Visible inside the Modal, so it can't be covered by it.
+      setQrSaved(true);
+      showToast(`The QR code is successfully downloaded to your gallery.`);
+    } catch (error) {
+      showToast(
+        getUserFriendlyErrorMessage(
+          error,
+          "Save farm QR code",
+          "We couldn't save this farm QR code. Please check your gallery permission and try again."
+        )
+      );
+    } finally {
+      setQrSaving(false);
     }
   };
 
@@ -240,6 +294,22 @@ const FarmProfile = () => {
                   </TouchableOpacity>
 
                   <TouchableOpacity
+                    onPress={() => {
+                      setQrSaved(false);
+                      setFarmQrVisible(true);
+                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel="View and download farm QR code"
+                    style={{
+                      width: 38, height: 38, borderRadius: 20,
+                      backgroundColor: "#f0fdf4", borderWidth: 1, borderColor: "#dcfce7",
+                      alignItems: "center", justifyContent: "center",
+                    }}
+                  >
+                    <Ionicons name="qr-code-outline" size={18} color={DARK_GREEN} />
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
                     onPress={toggleFavorite}
                     style={{
                       width: 38, height: 38, borderRadius: 20,
@@ -297,7 +367,7 @@ const FarmProfile = () => {
 
                 <Text style={{ fontSize: 11, fontWeight: "700", color: DARK_GREEN }}>Owner</Text>
               </View>
-              
+
               <View style={{ height: 1, backgroundColor: "#f3f4f6", marginBottom: 14 }} />
 
               {/* Heading and sort control share one row. */}
@@ -422,6 +492,167 @@ const FarmProfile = () => {
           </View>
         </TouchableOpacity>
       </Modal>
+
+      {/* Farmer-specific QR code. Buyers can view and save it to their gallery. */}
+      <Modal
+        visible={farmQrVisible}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => setFarmQrVisible(false)}
+      >
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: "rgba(0,0,0,0.55)",
+            justifyContent: "center",
+            alignItems: "center",
+            padding: 24,
+          }}
+        >
+          <View
+            style={{
+              width: "100%",
+              maxWidth: 380,
+              borderRadius: 18,
+              backgroundColor: "white",
+              padding: 22,
+              alignItems: "center",
+            }}
+          >
+            <View
+              style={{
+                width: "100%",
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: 8,
+              }}
+            >
+              <Text style={{ fontSize: 18, fontWeight: "700", color: "#111827" }}>
+                {farmName} QR Code
+              </Text>
+              <TouchableOpacity
+                onPress={() => setFarmQrVisible(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Close farm QR code"
+                style={{ padding: 4 }}
+              >
+                <Ionicons name="close" size={22} color="#6b7280" />
+              </TouchableOpacity>
+            </View>
+
+            <Text
+              style={{
+                color: "#6b7280",
+                fontSize: 13,
+                textAlign: "center",
+                lineHeight: 19,
+                marginBottom: 18,
+              }}
+            >
+              Scan this code to open this farmer's public farm page.
+            </Text>
+
+            <ViewShot
+              ref={qrRef}
+              options={{ format: "png", quality: 1 }}
+            >
+              <View
+                style={{
+                  backgroundColor: "white",
+                  borderWidth: 1,
+                  borderColor: "#e5e7eb",
+                  borderRadius: 12,
+                  padding: 18,
+                  alignItems: "center",
+                }}
+              >
+                <QRCode value={farmQrValue} size={220} />
+                <Text
+                  style={{
+                    marginTop: 12,
+                    fontSize: 15,
+                    fontWeight: "700",
+                    color: DARK_GREEN,
+                    textAlign: "center",
+                  }}
+                >
+                  {farmName}
+                </Text>
+                <Text
+                  style={{
+                    marginTop: 3,
+                    fontSize: 11,
+                    color: "#6b7280",
+                    textAlign: "center",
+                  }}
+                >
+                  FarmGate
+                </Text>
+              </View>
+            </ViewShot>
+
+            <TouchableOpacity
+              onPress={handleDownloadFarmQr}
+              disabled={qrSaving}
+              accessibilityRole="button"
+              accessibilityLabel="Download farm QR code"
+              className="mt-5 w-full flex-row items-center justify-center rounded-xl py-3.5"
+              style={{ backgroundColor: DARK_GREEN, opacity: qrSaving ? 0.7 : 1 }}
+            >
+              {qrSaving ? (
+                <ActivityIndicator size="small" color="white" />
+              ) : (
+                <Ionicons
+                  name={qrSaved ? "checkmark-circle" : "download-outline"}
+                  size={19}
+                  color="white"
+                />
+              )}
+              <Text className="ml-2 font-semibold text-white">
+                {qrSaving ? "Saving..." : qrSaved ? "Saved to Gallery" : "Download QR Code"}
+              </Text>
+            </TouchableOpacity>
+
+            {qrSaved ? (
+              <View
+                style={{
+                  marginTop: 10,
+                  width: "100%",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 6,
+                  backgroundColor: "#f0fdf4",
+                  borderWidth: 1,
+                  borderColor: "#dcfce7",
+                  borderRadius: 10,
+                  paddingVertical: 8,
+                  paddingHorizontal: 10,
+                }}
+              >
+                <Ionicons name="checkmark-circle" size={16} color="#15803d" />
+                <Text style={{ fontSize: 12, fontWeight: "600", color: "#15803d", flexShrink: 1 }}>
+                  Na-download na ang QR Code at na-save na sa iyong gallery.
+                </Text>
+              </View>
+            ) : null}
+
+            <Text
+              style={{
+                marginTop: 10,
+                fontSize: 10,
+                color: "#9ca3af",
+                textAlign: "center",
+              }}
+            >
+              The QR code is specific to this farmer's farm profile.
+            </Text>
+          </View>
+        </View>
+      </Modal>
+
     </View>
   );
 };

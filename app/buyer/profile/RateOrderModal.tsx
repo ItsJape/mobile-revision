@@ -1,4 +1,4 @@
-// Modal where a buyer rates and reviews a product they ordered.
+// Modal where a buyer rates and reviews one specific product variant they ordered.
 import { Ionicons } from "@expo/vector-icons";
 import React, { useState } from "react";
 import {
@@ -15,6 +15,7 @@ import { OrderProduct } from "@/src/types/order";
 import { doc, getDoc } from "firebase/firestore";
 import { db } from "../../../FirebaseConfig";
 import { getUserFriendlyErrorMessage } from "@/src/utils/userFacingError";
+import { getOrderProductReviewKey } from "@/src/utils/orderReview";
 
 type Props = {
   visible: boolean;
@@ -23,15 +24,11 @@ type Props = {
   product: OrderProduct | null;
   buyerId: string;
   buyerName: string;
-  buyerProfileImage?: string; 
-  // Called after a review is saved, so the parent screen (orders.tsx) can update
-  // its own state and hide the Rate button without refetching the whole list.
-  onSubmitted: (productId: string) => void;
+  buyerProfileImage?: string;
+  // Returns a composite key for the exact product variant reviewed.
+  onSubmitted: (reviewKey: string) => void;
 };
 
-// Rating popup shown when the buyer taps Rate on a delivered order. The review
-// is linked to the order, to the batch, and, when available, to the specific
-// harvest record the product came from, so a complaint can be traced back later.
 const RateOrderModal = ({
   visible,
   onClose,
@@ -55,15 +52,18 @@ const RateOrderModal = ({
 
   const handleSubmit = async () => {
     if (!product) return;
+
     if (!comment.trim()) {
       setError("Please write a short review.");
       return;
     }
+
     setError("");
     setSubmitting(true);
 
     try {
       let profileImage = buyerProfileImage || "";
+
       if (!profileImage && buyerId) {
         const buyerDoc = await getDoc(doc(db, "users", buyerId));
         profileImage = buyerDoc.exists()
@@ -74,9 +74,8 @@ const RateOrderModal = ({
       await addReview({
         productId: product.productId,
         orderProduct: product,
-        batchId: product.batchId || "",
-        batchNumber: product.batchNumber ?? 0,
-        harvestRecordId: product.harvestRecordId || undefined,
+        variantId: product.variantId || "",
+        variantName: product.variantName || "",
         orderId,
         buyerId,
         buyerName,
@@ -86,16 +85,27 @@ const RateOrderModal = ({
         createdAt: Date.now(),
       });
 
-      await markProductReviewed(orderId, product.productId);
+      await markProductReviewed(
+        orderId,
+        product.productId,
+        product.variantId || "",
+        product.variantName || ""
+      );
 
-      onSubmitted(product.productId);
+      const reviewKey = getOrderProductReviewKey(
+        product.productId,
+        product.variantId || "",
+        product.variantName || ""
+      );
+
+      onSubmitted(reviewKey);
       resetForm();
       onClose();
     } catch (err) {
       setError(
         getUserFriendlyErrorMessage(
           err,
-          "Submit buyer product review",
+          "Submit buyer product variant review",
           "We couldn't submit your review right now. Please try again in a moment."
         )
       );
@@ -107,22 +117,38 @@ const RateOrderModal = ({
   if (!product) return null;
 
   return (
-    <Modal visible={visible} transparent animationType="fade" statusBarTranslucent>
-      <View className="flex-1 bg-black/40 justify-center px-6">
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      statusBarTranslucent
+      onRequestClose={onClose}
+    >
+      <View className="flex-1 justify-center bg-black/40 px-6">
         <View
-          className="bg-white rounded-[10px] p-6"
+          className="rounded-[10px] bg-white p-6"
           style={{ borderWidth: 1, borderColor: "#14532d" }}
         >
-          <Text className="text-lg font-bold mb-1">Rate this product</Text>
-          <Text className="text-xs text-gray-400 mb-4">{product.name}</Text>
+          <Text className="mb-1 text-lg font-bold">Rate this product</Text>
+          <Text className="mb-4 text-xs text-gray-400">
+            {product.name}
+            {product.variantName ? ` · ${product.variantName}` : ""}
+          </Text>
 
-          {error ? <Text className="text-red-500 text-xs mb-3">{error}</Text> : null}
+          {error ? (
+            <Text className="mb-3 text-xs text-red-500">{error}</Text>
+          ) : null}
 
-          <View className="flex-row justify-center mb-4">
-            {[1, 2, 3, 4, 5].map((s) => (
-              <TouchableOpacity key={s} onPress={() => setRating(s)} className="px-1">
+          <View className="mb-4 flex-row justify-center">
+            {[1, 2, 3, 4, 5].map((star) => (
+              <TouchableOpacity
+                key={star}
+                onPress={() => setRating(star)}
+                className="px-1"
+                disabled={submitting}
+              >
                 <Ionicons
-                  name={s <= rating ? "star" : "star-outline"}
+                  name={star <= rating ? "star" : "star-outline"}
                   size={32}
                   color="#f59e0b"
                 />
@@ -130,42 +156,44 @@ const RateOrderModal = ({
             ))}
           </View>
 
-
           <TextInput
             value={comment}
             onChangeText={setComment}
             multiline
+            editable={!submitting}
             placeholder="Kumusta ang produkto? (freshness, sukat, atbp.)"
-            className="bg-gray-100 px-4 py-3 rounded-[5px] mb-4 h-24 border border-gray-300"
+            textAlignVertical="top"
+            className="mb-4 h-24 rounded-[5px] border border-gray-300 bg-gray-100 px-4 py-3"
           />
 
-            <View className="flex-row justify-between">
-              <TouchableOpacity
-                onPress={() => {
-                    resetForm();
-                    onClose();
-                  }}
-                  className="w-[48%] py-3 rounded-[5px] items-center"
-                  style={{ borderWidth: 1, borderColor: "#14532d" }}
-                >
-                <Text style={{ color: "#14532d" }} className="font-semibold">
-                  Cancel
-                </Text>
-              </TouchableOpacity>
+          <View className="flex-row justify-between">
+            <TouchableOpacity
+              onPress={() => {
+                resetForm();
+                onClose();
+              }}
+              disabled={submitting}
+              className="w-[48%] items-center rounded-[5px] py-3"
+              style={{ borderWidth: 1, borderColor: "#14532d" }}
+            >
+              <Text style={{ color: "#14532d" }} className="font-semibold">
+                Cancel
+              </Text>
+            </TouchableOpacity>
 
-                <TouchableOpacity
-                    onPress={handleSubmit}
-                    disabled={submitting}
-                    className="w-[48%] py-3 rounded-[5px] items-center"
-                    style={{ backgroundColor: submitting ? "#9ca3af" : "#14532d" }}
-                  >
-                  {submitting ? (
-                    <ActivityIndicator color="#fff" />
-                  ) : (
-                    <Text className="text-white font-bold">Submit</Text>
-                  )}
-                </TouchableOpacity>
-            </View>
+            <TouchableOpacity
+              onPress={handleSubmit}
+              disabled={submitting}
+              className="w-[48%] items-center rounded-[5px] py-3"
+              style={{ backgroundColor: submitting ? "#9ca3af" : "#14532d" }}
+            >
+              {submitting ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text className="font-bold text-white">Submit</Text>
+              )}
+            </TouchableOpacity>
+          </View>
         </View>
       </View>
     </Modal>

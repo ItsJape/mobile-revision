@@ -1,13 +1,10 @@
-export type EggVariant = "half" | "full";
-
-// A product line in the cart. The quantity, unit, and price are stored in the
-// tray size the buyer chose, while baseUnit and baseQuantity keep the farmer's
-// listing unit so stock math stays correct.
+// A product line in the cart. One line = one product variant. The price is only
+// a preview: the server re-reads the variant price and stock when the order is made.
 export type CartItem = {
   docId?: string;
   productId: string;
-  batchId: string;
-  batchNumber: number;
+  variantId: string;
+  variantName?: string;
   buyerId: string;
   buyerName: string;
   farmerId?: string;
@@ -17,8 +14,5 @@ export type CartItem = {
   price: number;
   quantity: number;
   unit: string;
-  eggVariant?: EggVariant | null;
-  baseUnit?: string;
-  baseQuantity?: number;
   createdAt: number;
 };

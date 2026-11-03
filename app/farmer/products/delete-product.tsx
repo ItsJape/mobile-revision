@@ -20,8 +20,8 @@ type Props = {
 
 // Confirm popup before archiving a product.
 // This used to be called "Delete Product", but it is really "Archive": the
-// product, its image, and its harvest and order history are never deleted. It is
-// only hidden from the lists, the home page, and FIFO selling, and it can still
+// product, its image, its variants, and its order history are never deleted. It
+// is only hidden from the lists, the home page, and the shop, and it can still
 // be unarchived later if needed.
 const DeleteProductModal = ({ visible, onCancel, onConfirm, loading, product }: Props) => {
   return (
@@ -53,7 +53,7 @@ const DeleteProductModal = ({ visible, onCancel, onConfirm, loading, product }: 
               {product?.name}
             </Text>
             . It will no longer appear in your listing or to buyers, but all of
-            its data will remain (harvest history, orders, reviews). You can
+            its data will remain (variants, orders, reviews). You can
             unarchive it later if needed.
           </Text>
 

@@ -16,6 +16,8 @@ import { getAuth } from "firebase/auth";
 import { db } from "../../FirebaseConfig";
 
 import type { OrderProduct, OrderType } from "../types/order";
+import { getOrderProductReviewKey } from "../utils/orderReview";
+export { getOrderProductReviewKey } from "../utils/orderReview";
 
 const BACKEND_URL = String(
   process.env.EXPO_PUBLIC_BACKEND_URL || ""
@@ -41,7 +43,6 @@ const requestBackend = async <T = any>(
   }
 
   const token = await user.getIdToken();
-
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
 
@@ -57,7 +58,6 @@ const requestBackend = async <T = any>(
     });
 
     const text = await response.text();
-
     let data: any = {};
 
     try {
@@ -72,8 +72,6 @@ const requestBackend = async <T = any>(
           data?.message ||
           `Backend request failed with status ${response.status}.`
       );
-      // Codes such as MANUAL_FEE_REQUIRED, FARM_MISSING_PICKUP, and RATE_LIMITED
-      // are passed through so checkout can show a proper message and a retry.
       if (data?.code) err.code = data.code;
       err.status = response.status;
       throw err;
@@ -84,7 +82,6 @@ const requestBackend = async <T = any>(
     if (error?.name === "AbortError") {
       throw new Error("The server took too long to respond. Please try again.");
     }
-
     throw error;
   } finally {
     clearTimeout(timer);
@@ -92,8 +89,7 @@ const requestBackend = async <T = any>(
 };
 
 // Asks the backend for the live Xendit status of this order's GCash payment and
-// fulfills the order when Xendit says SUCCEEDED. This repairs orders stuck in
-// "pending" because the payment.capture webhook never arrived.
+// fulfills the order when Xendit says SUCCEEDED.
 export const syncOrderPayment = async (
   orderId: string
 ): Promise<{
@@ -111,10 +107,7 @@ export const syncOrderPayment = async (
   );
 
 // Places a new order through the backend. The backend recomputes the delivery
-// fee from the farmer's stored pickup address and the buyer's address, so the
-// fee sent from here is ignored. Subtotal and commission are also recalculated
-// on the server when the order is accepted (COD) or paid (GCash), so no amount
-// computed here is trusted for money.
+// fee and all trusted financial values.
 export const createOrder = async (order: OrderType) => {
   const data = await requestBackend<{
     success: boolean;
@@ -154,9 +147,7 @@ export const createOrder = async (order: OrderType) => {
   };
 };
 
-// Replaces the products of an order. This is only allowed while the order is
-// still pending, because after acceptance the backend has already priced the
-// order and, for GCash, created the payment.
+// Replaces the products of an order. Only allowed while still pending.
 export const updateOrderProducts = async (
   orderId: string,
   buyerId: string,
@@ -166,16 +157,12 @@ export const updateOrderProducts = async (
     const ref = doc(db, "orders", orderId);
     const snap = await getDoc(ref);
 
-    if (!snap.exists()) {
-      throw new Error("Order not found.");
-    }
+    if (!snap.exists()) throw new Error("Order not found.");
 
     const order = snap.data() as OrderType;
-
     if (order.buyerId !== buyerId) {
       throw new Error("You are not authorized to update this order.");
     }
-
     if (order.status !== "pending") {
       throw new Error("Products can only be changed while the order is pending.");
     }
@@ -188,7 +175,6 @@ export const updateOrderProducts = async (
     return true;
   } catch (error) {
     console.log("ERROR UPDATING ORDER PRODUCTS:", error);
-
     throw error;
   }
 };
@@ -200,25 +186,18 @@ export const createGcashPayment = async (
 ) => {
   try {
     const snap = await getDoc(doc(db, "orders", orderId));
-
-    if (!snap.exists()) {
-      throw new Error("Order not found.");
-    }
+    if (!snap.exists()) throw new Error("Order not found.");
 
     const order = snap.data() as OrderType;
-
     if (order.buyerId !== buyerId) {
       throw new Error("You are not authorized to pay for this order.");
     }
-
     if (order.payment !== "gcash") {
       throw new Error("This order is not a GCash order.");
     }
-
     if (order.status !== "accepted") {
       throw new Error("The farmer must accept the order before GCash payment.");
     }
-
     if (order.paymentStatus === "paid") {
       return {
         success: true,
@@ -228,8 +207,6 @@ export const createGcashPayment = async (
       };
     }
 
-    // The timeout is generous here because the backend re-prices the order and
-    // then calls Xendit.
     return await requestBackend(
       "/create-payment",
       {
@@ -251,13 +228,9 @@ export const getOrderPaymentStatus = async (
 ) => {
   try {
     const snap = await getDoc(doc(db, "orders", orderId));
-
-    if (!snap.exists()) {
-      throw new Error("Order not found.");
-    }
+    if (!snap.exists()) throw new Error("Order not found.");
 
     const order = snap.data() as OrderType;
-
     if (order.buyerId !== buyerId) {
       throw new Error("You are not authorized to view this payment status.");
     }
@@ -265,7 +238,6 @@ export const getOrderPaymentStatus = async (
     return order.paymentStatus || "pending";
   } catch (error) {
     console.log("ERROR GETTING PAYMENT STATUS:", error);
-
     throw error;
   }
 };
@@ -274,10 +246,7 @@ export const getOrderPaymentStatus = async (
 export const getOrderById = async (id: string) => {
   try {
     const snap = await getDoc(doc(db, "orders", id));
-
-    if (!snap.exists()) {
-      throw new Error("Order not found.");
-    }
+    if (!snap.exists()) throw new Error("Order not found.");
 
     return {
       id: snap.id,
@@ -285,98 +254,97 @@ export const getOrderById = async (id: string) => {
     } as OrderType;
   } catch (error) {
     console.log("ERROR GETTING ORDER:", error);
-
     throw error;
   }
 };
 
-// Normalizes the different Firestore timestamp shapes to milliseconds so
-// orders can be sorted by date.
+// Normalizes Firestore timestamp shapes to milliseconds.
 const toMillis = (ts: any) => {
   if (!ts) return 0;
-
   if (typeof ts.toMillis === "function") return ts.toMillis();
-
   if (typeof ts.seconds === "number") return ts.seconds * 1000;
-
   if (typeof ts === "number") return ts;
-
   if (typeof ts === "string") {
     const parsed = new Date(ts).getTime();
-
     return Number.isFinite(parsed) ? parsed : 0;
   }
-
   return 0;
 };
 
-// Returns the orders a buyer placed, newest first.
+// Returns buyer orders, newest first.
 export const getBuyerOrders = async (buyerId: string) => {
   try {
     const q = query(collection(db, "orders"), where("buyerId", "==", buyerId));
-
     const snapshot = await getDocs(q);
-
     const orders = snapshot.docs.map(
       (d) => ({ id: d.id, ...d.data() } as OrderType)
     );
-
     return orders.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
   } catch (error) {
     console.log("ERROR GETTING BUYER ORDERS:", error);
-
     throw error;
   }
 };
 
-// Returns the orders a farmer received, newest first.
+// Returns farmer orders, newest first.
 export const getFarmerOrders = async (farmerId: string) => {
   try {
     const q = query(collection(db, "orders"), where("farmerId", "==", farmerId));
-
     const snapshot = await getDocs(q);
-
     const orders = snapshot.docs.map(
       (d) => ({ id: d.id, ...d.data() } as OrderType)
     );
-
     return orders.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
   } catch (error) {
     console.log("ERROR GETTING FARMER ORDERS:", error);
-
     throw error;
   }
 };
 
-// Flags one product of an order as reviewed so the rating modal does not
-// appear again.
+// Marks only the exact product variant in an order as reviewed.
 export const markProductReviewed = async (
   orderId: string,
-  productId: string
+  productId: string,
+  variantId?: string,
+  variantName?: string
 ) => {
   try {
     const ref = doc(db, "orders", orderId);
     const snap = await getDoc(ref);
 
-    if (!snap.exists()) {
-      throw new Error("Order not found.");
-    }
+    if (!snap.exists()) throw new Error("Order not found.");
 
     const order = snap.data() as OrderType;
-    if (
-      order.status !== "delivered" &&
-      order.status !== "claimed"
-    ) {
+    if (order.status !== "delivered" && order.status !== "claimed") {
       throw new Error("Only completed orders can be reviewed.");
     }
 
+    const reviewKey = getOrderProductReviewKey(
+      productId,
+      variantId,
+      variantName
+    );
+
+    // Check that the exact product/variant is part of this order.
+    const matchingItem = (order.products || []).some((item) => {
+      const itemKey = getOrderProductReviewKey(
+        item.productId,
+        item.variantId,
+        item.variantName
+      );
+      return itemKey === reviewKey;
+    });
+
+    if (!matchingItem) {
+      throw new Error("This product variant is not part of the selected order.");
+    }
+
     await updateDoc(ref, {
-      reviewedProductIds: arrayUnion(productId),
+      reviewedProductIds: arrayUnion(reviewKey),
       updatedAt: serverTimestamp(),
     });
   } catch (error) {
-    console.log("ERROR MARKING REVIEW:", error);
-
+    console.log("ERROR MARKING PRODUCT VARIANT REVIEW:", error);
     throw error;
   }
 };
@@ -389,17 +357,12 @@ export const cancelOrder = async (
 ) => {
   try {
     const snap = await getDoc(doc(db, "orders", orderId));
-
-    if (!snap.exists()) {
-      throw new Error("Order not found.");
-    }
+    if (!snap.exists()) throw new Error("Order not found.");
 
     const order = snap.data() as OrderType;
-
     if (order.buyerId !== buyerId) {
       throw new Error("You are not authorized to cancel this order.");
     }
-
     if (order.payment === "gcash" && order.paymentStatus === "paid") {
       throw new Error(
         "This GCash order has already been paid and cannot be cancelled here because a refund is required."
@@ -413,7 +376,6 @@ export const cancelOrder = async (
         body: JSON.stringify({ reason: reason?.trim() || "Cancelled by buyer." }),
       }
     );
-
     return true;
   } catch (error) {
     console.log("ERROR CANCELLING ORDER:", error);
@@ -425,29 +387,20 @@ export const cancelOrder = async (
 export const acceptOrder = async (orderId: string, farmerId: string) => {
   try {
     const snap = await getDoc(doc(db, "orders", orderId));
-
-    if (!snap.exists()) {
-      throw new Error("Order not found.");
-    }
+    if (!snap.exists()) throw new Error("Order not found.");
 
     const order = snap.data() as OrderType;
-
     if (order.farmerId !== farmerId) {
       throw new Error("You are not authorized to accept this order.");
     }
-
     if (order.status !== "pending") {
       throw new Error("Only pending orders can be accepted.");
     }
 
     await requestBackend(
       `/wallet/orders/${encodeURIComponent(orderId)}/accept`,
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-      }
+      { method: "POST", body: JSON.stringify({}) }
     );
-
     return true;
   } catch (error) {
     console.log("ERROR ACCEPTING ORDER:", error);
@@ -463,17 +416,12 @@ export const cancelAcceptedOrderByFarmer = async (
 ) => {
   try {
     const snap = await getDoc(doc(db, "orders", orderId));
-
-    if (!snap.exists()) {
-      throw new Error("Order not found.");
-    }
+    if (!snap.exists()) throw new Error("Order not found.");
 
     const order = snap.data() as OrderType;
-
     if (order.farmerId !== farmerId) {
       throw new Error("You are not authorized to cancel this order.");
     }
-
     if (order.status !== "accepted") {
       throw new Error("Only accepted orders can be cancelled here.");
     }
@@ -485,7 +433,6 @@ export const cancelAcceptedOrderByFarmer = async (
         body: JSON.stringify({ reason: reason?.trim() || "Cancelled by farmer." }),
       }
     );
-
     return true;
   } catch (error) {
     console.log("ERROR CANCELLING ACCEPTED ORDER BY FARMER:", error);
@@ -493,8 +440,7 @@ export const cancelAcceptedOrderByFarmer = async (
   }
 };
 
-// Declines a pending order. The backend handles this so an order that was
-// already paid can never be declined and leave the buyer without their money.
+// Declines a pending order. The backend protects paid orders.
 export const declineOrder = async (
   orderId: string,
   farmerId: string,
@@ -502,17 +448,12 @@ export const declineOrder = async (
 ) => {
   try {
     const snap = await getDoc(doc(db, "orders", orderId));
-
-    if (!snap.exists()) {
-      throw new Error("Order not found.");
-    }
+    if (!snap.exists()) throw new Error("Order not found.");
 
     const order = snap.data() as OrderType;
-
     if (order.farmerId !== farmerId) {
       throw new Error("You are not authorized to decline this order.");
     }
-
     if (order.status !== "pending") {
       throw new Error("Only pending orders can be declined.");
     }
@@ -524,19 +465,12 @@ export const declineOrder = async (
         body: JSON.stringify({ reason: reason?.trim() || "Declined by farmer." }),
       }
     );
-
     return true;
   } catch (error) {
     console.log("ERROR DECLINING ORDER:", error);
-
     throw error;
   }
 };
-
-// Delivery quotes. The client never computes a fee it can trust: the backend
-// reads each farm's barangay from users/{farmerId} and measures the distance
-// from the barangay centroids. The buyer's location comes from the city and
-// barangay of the address they picked.
 
 // City, barangay, and province of the delivery destination.
 export type BuyerLocation = {
@@ -545,7 +479,6 @@ export type BuyerLocation = {
   province?: string;
 };
 
-// The quote for one farm inside a cart.
 export type QuoteBatchItem = {
   key: string;
   farmerId: string;
@@ -568,22 +501,22 @@ export const quoteDeliveries = async (
   buyer: BuyerLocation | null,
   delivery: "pickup" | "delivery" = "delivery"
 ): Promise<QuoteBatchItem[]> => {
-  if (delivery !== "delivery" || items.length === 0) {
-    return [];
-  }
-  const data = await requestBackend<{ success: boolean; quotes: QuoteBatchItem[] }>(
-    "/delivery/quote",
-    {
-      method: "POST",
-      body: JSON.stringify({
-        items,
-        buyerCity: buyer?.city || "",
-        buyerBarangay: buyer?.barangay || "",
-        buyerProvince: buyer?.province || "",
-        delivery,
-      }),
-    }
-  );
+  if (delivery !== "delivery" || items.length === 0) return [];
+
+  const data = await requestBackend<{
+    success: boolean;
+    quotes: QuoteBatchItem[];
+  }>("/delivery/quote", {
+    method: "POST",
+    body: JSON.stringify({
+      items,
+      buyerCity: buyer?.city || "",
+      buyerBarangay: buyer?.barangay || "",
+      buyerProvince: buyer?.province || "",
+      delivery,
+    }),
+  });
+
   return Array.isArray(data?.quotes) ? data.quotes : [];
 };
 
@@ -592,10 +525,15 @@ export const quoteDelivery = async (
   farmerId: string,
   buyer: BuyerLocation | null,
   delivery: "pickup" | "delivery" = "delivery"
-): Promise<{ deliveryFee: number; distanceKm: number | null; tier: string | null }> => {
+): Promise<{
+  deliveryFee: number;
+  distanceKm: number | null;
+  tier: string | null;
+}> => {
   if (delivery !== "delivery") {
     return { deliveryFee: 0, distanceKm: 0, tier: null };
   }
+
   return await requestBackend("/delivery/quote", {
     method: "POST",
     body: JSON.stringify({
@@ -608,13 +546,7 @@ export const quoteDelivery = async (
   });
 };
 
-// Moves an order to the next status, routing each step to the endpoint that
-// belongs to it:
-//  - accepted     : handled by acceptOrder, which prices the order
-//  - processing   : COD stock is deducted atomically; GCash must already be paid
-//  - to_receive   : only reachable from processing
-//  - delivered and claimed: financial settlement, which is idempotent.
-//    "claimed" is the pickup equivalent of "delivered" and uses the same endpoint.
+// Moves an order to the next status through the trusted backend.
 export const updateOrderStatus = async (
   orderId: string,
   farmerId: string,
@@ -623,16 +555,13 @@ export const updateOrderStatus = async (
   try {
     const encodedId = encodeURIComponent(orderId);
 
-    if (status === "accepted") {
-      return await acceptOrder(orderId, farmerId);
-    }
+    if (status === "accepted") return await acceptOrder(orderId, farmerId);
 
     if (status === "processing") {
       await requestBackend(`/orders/${encodedId}/process`, {
         method: "POST",
         body: JSON.stringify({}),
       });
-
       return true;
     }
 
@@ -641,15 +570,10 @@ export const updateOrderStatus = async (
         method: "POST",
         body: JSON.stringify({}),
       });
-
       return true;
     }
 
     if (status === "delivered" || status === "claimed") {
-      // Settlement has to run on the trusted backend, and the backend also keeps the
-      // delivery and wallet ledger updates idempotent. Pickup ("claimed") and
-      // delivery ("delivered") share one settlement: the backend stores
-      // "claimed" for pickup orders and "delivered" otherwise.
       return await requestBackend(`/wallet/orders/${encodedId}/deliver`, {
         method: "POST",
         body: JSON.stringify({}),
@@ -659,7 +583,6 @@ export const updateOrderStatus = async (
     throw new Error("Invalid order status.");
   } catch (error) {
     console.log("ERROR UPDATING ORDER STATUS:", error);
-
     throw error;
   }
 };

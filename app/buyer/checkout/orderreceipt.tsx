@@ -514,6 +514,15 @@ export default function OrderReceipt() {
                             {product.name}
                           </Text>
 
+                          {product.variantName ? (
+                            <Text
+                              className="text-xs font-semibold mt-0.5"
+                              style={{ color: DARK_GREEN }}
+                            >
+                              {product.variantName}
+                            </Text>
+                          ) : null}
+
                           <Text className="text-gray-500 text-xs mt-1">
                             Qty:{" "}
                             {Number(

@@ -12,7 +12,7 @@ import {
 } from "@/src/constants/buyerLayout";
 import { FARMER_CONTENT_BOTTOM_GAP } from "@/src/constants/farmerLayout";
 import React, { useCallback, useState } from "react";
-import { getBatchesByProduct } from "@/src/services/productService";
+import { getProductById } from "@/src/services/productService";
 
 import {
   ActivityIndicator,
@@ -36,26 +36,28 @@ import {
 
 import { CartItem } from "@/src/types/cart";
 
-import {
-  eggVariantToBaseQuantity,
-  baseStockToVariantStock,
-  normalizeEggVariant,
-  eggVariantLabel,
-} from "@/src/constants/productCatalog";
+// A cart line is one product variant. Stock is tracked per product + variant.
+const stockKeyOf = (p: any): string =>
+  `${String(p?.productId || "")}|${String(p?.variantId || "")}`;
 
-// Get the base-unit quantity for stock math. Without a variant, quantity is already the base amount.
-const baseQtyOf = (p: any): number => {
-  const v = normalizeEggVariant(p?.eggVariant);
-  if (!v) return Number(p?.quantity || 0);
-  return eggVariantToBaseQuantity(v, Number(p?.quantity || 0), p?.baseUnit || p?.unit || "");
+// Stock that can really be bought: the variant must be Available and in stock.
+const sellableStockOf = (variant: any): number =>
+  variant && variant.status === "Available" && Number(variant.stock) > 0
+    ? Number(variant.stock)
+    : 0;
+
+// Finds the variant a cart line points to. An old line without a variantId is only
+// accepted when the product has exactly one variant.
+const findVariant = (product: any, variantId?: string) => {
+  const variants: any[] = Array.isArray(product?.variants) ? product.variants : [];
+  if (variantId) return variants.find((v) => v.id === variantId) || null;
+  return variants.length === 1 ? variants[0] : null;
 };
 
-// Get the max quantity in variant terms converted from base stock.
-const maxQtyOf = (p: any, baseStock: number | null): number => {
-  if (typeof baseStock !== "number") return Number(p?.quantity || 0);
-  const v = normalizeEggVariant(p?.eggVariant);
-  if (!v) return Math.floor(baseStock);
-  return baseStockToVariantStock(baseStock, p?.baseUnit || p?.unit || "", v);
+// The most the buyer may put in the cart for one variant.
+const maxQtyOf = (p: any, stock: number | null): number => {
+  if (typeof stock !== "number") return Number(p?.quantity || 0);
+  return Math.floor(stock);
 };
 
 export default function Cart() {
@@ -100,28 +102,59 @@ export default function Cart() {
 
       const grouped = groupCartByFarmer(items);
 
-      setCartItems(grouped);
-
-      // Load real available stock across all sellable batches to limit the increment button.
+      // Load each product once. Variant price and stock come from the product, so
+      // the cart shows what the server will charge.
       const uniqueProductIds = Array.from(new Set(items.map((i) => i.productId)));
 
-      const stockEntries = await Promise.all(
+      const failedProducts = new Set<string>();
+      const productMap = new Map<string, any>();
+
+      await Promise.all(
         uniqueProductIds.map(async (productId) => {
           try {
-            const productBatches = await getBatchesByProduct(productId);
-            const available = productBatches
-              .filter((b) => b.stock > 0 && b.archived !== true &&
-                  b.status === "Available")
-              .reduce((sum, b) => sum + b.stock, 0);
-            return [productId, available] as const;
+            productMap.set(productId, await getProductById(productId));
           } catch (error) {
+            failedProducts.add(productId);
             getUserFriendlyErrorMessage(error, "Load cart product stock");
-            return [productId, null] as const;
           }
         })
       );
 
-      setStockMap(Object.fromEntries(stockEntries));
+      const nextStock: Record<string, number | null> = {};
+
+      const refreshed = grouped.map((farm) => ({
+        ...farm,
+        products: farm.products.map((p: any) => {
+          // Could not load the product, so the stock cannot be verified.
+          if (failedProducts.has(p.productId)) {
+            nextStock[stockKeyOf(p)] = null;
+            return p;
+          }
+
+          const variant = findVariant(productMap.get(p.productId), p.variantId);
+
+          // The product or variant no longer exists, so nothing can be bought.
+          if (!variant) {
+            nextStock[stockKeyOf(p)] = 0;
+            return p;
+          }
+
+          const line = {
+            ...p,
+            variantId: variant.id,
+            variantName: variant.name,
+            price: Number(variant.price),
+            unit: variant.unit,
+          };
+
+          nextStock[stockKeyOf(line)] = sellableStockOf(variant);
+
+          return line;
+        }),
+      }));
+
+      setCartItems(refreshed);
+      setStockMap(nextStock);
 
     } catch (error) {
       Alert.alert(
@@ -210,7 +243,7 @@ export default function Cart() {
 
   if (!product?.docId) return;
 
-  const availableStock = stockMap[product.productId];
+  const availableStock = stockMap[stockKeyOf(product)];
 
   if (typeof availableStock !== "number") {
     showToast("Unable to verify stock. Please refresh the cart and try again.");
@@ -220,22 +253,18 @@ export default function Cart() {
   const maxQty = maxQtyOf(product, availableStock);
 
   if (product.quantity >= maxQty) {
-    const v = normalizeEggVariant((product as any).eggVariant);
     showToast(
-      v
-        ? `Only ${maxQty}x ${eggVariantLabel(v)} available`
-        : `Only ${availableStock} ${product.unit?.replace(/^per\s+/i, "")} available`
+      `Only ${availableStock} ${String(product.unit || "").replace(/^per\s+/i, "")} available`
     );
     return;
   }
 
   const newQty = product.quantity + 1;
-  const newBase = baseQtyOf({ ...product, quantity: newQty } as any);
 
   updateLocalQty(farmerId, docId, newQty);
 
   try {
-    await updateCartQuantity(product.docId, newQty, newBase);
+    await updateCartQuantity(product.docId, newQty);
   } catch (error) {
     updateLocalQty(farmerId, docId, product.quantity);
     Alert.alert(
@@ -265,12 +294,11 @@ export default function Cart() {
     if (product.quantity <= 1) return;
 
     const newQty = product.quantity - 1;
-    const newBase = baseQtyOf({ ...product, quantity: newQty } as any);
 
     updateLocalQty(farmerId, docId, newQty);
 
     try {
-      await updateCartQuantity(product.docId, newQty, newBase);
+      await updateCartQuantity(product.docId, newQty);
     } catch (error) {
       updateLocalQty(
         farmerId,
@@ -362,54 +390,84 @@ export default function Cart() {
       return false;
     }
 
-    const requestedMap = new Map<string, { quantity: number; name: string; unit: string }>();
+    // One entry per product + variant. The same variant on two lines is added up.
+    const requestedMap = new Map<
+      string,
+      { productId: string; variantId: string; quantity: number; name: string; unit: string }
+    >();
 
-    selectedProducts.forEach((product) => {
+    for (const product of selectedProducts as any[]) {
       const productId = String(product.productId || "").trim();
+
       if (!productId) {
-        throw new Error(`Product ID is missing for ${product.name || "a selected item"}.`);
+        Alert.alert(
+          "Unable to Verify Stock",
+          `Product ID is missing for ${product.name || "a selected item"}.`
+        );
+        return false;
       }
 
-      // Stock math always uses base units. Half tray equals 0.5 tray.
-      const need = baseQtyOf(product as any);
-      const baseUnit = (product as any).baseUnit || product.unit || "unit";
+      const key = stockKeyOf(product);
+      const current = requestedMap.get(key);
+      const label = product.variantName
+        ? `${product.name || "Product"} (${product.variantName})`
+        : product.name || "Product";
 
-      const current = requestedMap.get(productId);
-      requestedMap.set(productId, {
-        quantity: (current?.quantity || 0) + need,
-        name: current?.name || product.name || "Product",
-        unit: current?.unit || baseUnit,
+      requestedMap.set(key, {
+        productId,
+        variantId: String(product.variantId || ""),
+        quantity: (current?.quantity || 0) + Number(product.quantity || 0),
+        name: current?.name || label,
+        unit: current?.unit || product.unit || "unit",
       });
-    });
+    }
 
     setCheckingStock(true);
 
     try {
-      const checks = await Promise.all(
-        Array.from(requestedMap.entries()).map(async ([productId, requested]) => {
-          try {
-            const batches = await getBatchesByProduct(productId);
-            const available = batches
-              .filter((b) => Number(b.stock) > 0 && b.archived !== true &&
-                  b.status === "Available")
-              .reduce((sum, b) => sum + Number(b.stock || 0), 0);
+      const productIds = Array.from(
+        new Set(Array.from(requestedMap.values()).map((r) => r.productId))
+      );
 
-            return { productId, ...requested, available };
+      const failedProducts = new Set<string>();
+      const productMap = new Map<string, any>();
+
+      await Promise.all(
+        productIds.map(async (productId) => {
+          try {
+            productMap.set(productId, await getProductById(productId));
           } catch (error) {
+            failedProducts.add(productId);
             getUserFriendlyErrorMessage(
               error,
               "Verify stock before buyer checkout"
             );
-            return { productId, ...requested, available: null };
           }
         })
       );
 
+      const checks = Array.from(requestedMap.entries()).map(
+        ([key, requested]) => {
+          if (failedProducts.has(requested.productId)) {
+            return { key, ...requested, available: null as number | null };
+          }
+
+          const variant = findVariant(
+            productMap.get(requested.productId),
+            requested.variantId
+          );
+
+          return {
+            key,
+            ...requested,
+            available: sellableStockOf(variant) as number | null,
+          };
+        }
+      );
+
       setStockMap((prev) => ({
         ...prev,
-        ...Object.fromEntries(
-          checks.map((item) => [item.productId, item.available])
-        ),
+        ...Object.fromEntries(checks.map((item) => [item.key, item.available])),
       }));
 
       const failedVerification = checks.filter(
@@ -629,9 +687,9 @@ ${message}`
                         ₱{p.price.toFixed(2)}
                       </Text>
 
-                      {(p as any).eggVariant ? (
+                      {(p as any).variantName ? (
                         <Text className="text-green-900 text-xs mt-0.5 font-semibold">
-                          {eggVariantLabel((p as any).eggVariant)}
+                          {(p as any).variantName}
                         </Text>
                       ) : null}
 
@@ -670,11 +728,11 @@ ${message}`
 
                     <TouchableOpacity
                       onPress={() => incrementQty(farm.farmerId, p.docId!)}
-                      disabled={typeof stockMap[p.productId] !== "number" || p.quantity >= maxQtyOf(p as any, stockMap[p.productId] as number)}
+                      disabled={typeof stockMap[stockKeyOf(p)] !== "number" || p.quantity >= maxQtyOf(p as any, stockMap[stockKeyOf(p)] as number)}
                       className="w-7 h-7 rounded-[5px] items-center justify-center"
                       style={{
                         backgroundColor:
-                          typeof stockMap[p.productId] !== "number" || p.quantity >= maxQtyOf(p as any, stockMap[p.productId] as number)
+                          typeof stockMap[stockKeyOf(p)] !== "number" || p.quantity >= maxQtyOf(p as any, stockMap[stockKeyOf(p)] as number)
                             ? "#9ca3af"
                             : "#14532d",
                       }}

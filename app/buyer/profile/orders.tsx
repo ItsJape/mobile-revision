@@ -495,7 +495,11 @@ export default function BuyerOrders() {
 
             const productNames =
               (item.products || [])
-                ?.map((product) => product.name)
+                ?.map((product) =>
+                  product.variantName
+                    ? `${product.name} (${product.variantName})`
+                    : product.name
+                )
                 .filter(Boolean)
                 .join(", ") || "No items";
 
